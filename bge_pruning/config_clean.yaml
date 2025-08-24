@@ -1,0 +1,32 @@
+# BGE-M3 Pruning Configuration
+# Clean, minimal config for HuggingFace datasets
+
+model:
+  base_model: "BAAI/bge-m3"
+  use_sts_loss: true
+  use_contrastive_loss: true
+  temperature: 0.02
+  
+  l0_module:
+    pruning_modules: ["layer", "head", "intermediate"]
+    start_sparsity: 0.0
+    lagrangian_warmup_steps: "1000ba"
+    eval_target_model: true
+    
+    # Target architecture for 75% reduction
+    target_model:
+      n_layers: 18  # From 24
+      n_heads: 12   # From 16
+
+optimizer:
+  lr: 2.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.01
+
+# Training settings
+batch_size: 16
+max_length: 512
+max_duration: "1000ba"
+eval_interval: "100ba"
+seed: 42
