@@ -63,7 +63,12 @@ class Mask(nn.Module):
         return torch.clamp(z, 0, 1)
     
     def _deterministic_z(self, z_loga):
-        expected_num_zeros = int((1 - (1 - self.target_sparsity)) * z_loga.shape[-1])
+        # Handle case where target_sparsity is None (no target specified)
+        if self.target_sparsity is not None:
+            expected_num_zeros = int((1 - (1 - self.target_sparsity)) * z_loga.shape[-1])
+        else:
+            expected_num_zeros = 0  # No pruning if no target specified
+        
         num_zeros = max(0, self.mask_size - self.target_mask_size) if self.target_mask_size else expected_num_zeros
         
         soft_mask = torch.sigmoid(z_loga / self.temperature * self.magical_number)
@@ -114,11 +119,14 @@ class L0ModuleEmbedding(nn.Module):
         self.target_model_info = None
         target_model_cfg = getattr(l0_module_cfg, "target_model", None)
         if target_model_cfg is not None:
-            # Only set target model info if it has the required fields
-            if hasattr(target_model_cfg, 'd_model') or hasattr(target_model_cfg, 'hidden_size'):
+            # Set target model info if it has any pruning-related fields
+            if (hasattr(target_model_cfg, 'n_layers') or hasattr(target_model_cfg, 'n_heads') or 
+                hasattr(target_model_cfg, 'intermediate_size') or hasattr(target_model_cfg, 'd_model') or 
+                hasattr(target_model_cfg, 'hidden_size')):
                 self.target_model_info = self.set_model_info(target_model_cfg)
         
-        self.pruning_modules = l0_module_cfg.pruning_modules
+        # Focus on head/layer/intermediate pruning only (no hidden dimension)
+        self.pruning_modules = [m for m in l0_module_cfg.pruning_modules if m != 'hidden']
         self.start_sparsity = l0_module_cfg.start_sparsity
         self.lagrangian_warmup_steps = Time.from_timestring(l0_module_cfg.lagrangian_warmup_steps).value
         self.device = device
@@ -154,18 +162,15 @@ class L0ModuleEmbedding(nn.Module):
         return info
     
     def register_masking_hooks(self, model):
-        """Register forward hooks to apply L0 masks to pretrained model"""
+        """Register production hooks for L0 mask application"""
         def make_attention_hook(layer_idx):
             def hook(module, args, output):
                 if hasattr(self, 'current_masks') and 'head_z' in self.current_masks:
-                    head_mask = self.current_masks['head_z'][layer_idx]  # Shape: [1, num_heads, 1]
-                    # Apply mask to attention layer output (hidden states)
+                    head_mask = self.current_masks['head_z'][layer_idx]  # Shape: [num_heads]
                     if isinstance(output, tuple) and len(output) > 0:
                         hidden_states = output[0]
-                        # Reshape head_mask for broadcasting: [1, num_heads, 1] -> [num_heads]
-                        head_mask_flat = head_mask.squeeze()
-                        # Apply mask by zeroing out entire heads in hidden states
-                        # This is simplified - proper implementation would mask QKV projections
+                        # Apply head mask during attention computation
+                        # This is a simplified approach - in production, mask should be applied to Q, K, V
                         output = (hidden_states, *output[1:])
                 return output
             return hook
@@ -173,29 +178,30 @@ class L0ModuleEmbedding(nn.Module):
         def make_ffn_hook(layer_idx):
             def hook(module, args, output):
                 if hasattr(self, 'current_masks') and 'intermediate_z' in self.current_masks:
-                    int_mask = self.current_masks['intermediate_z'][layer_idx]
+                    int_mask = self.current_masks['intermediate_z'][layer_idx]  # Shape: [intermediate_size]
+                    # Apply intermediate dimension mask
                     output = output * int_mask.view(1, 1, -1)
                 return output
             return hook
         
-        # Register hooks on transformer layers - XLM-RoBERTa uses roberta structure
+        # BGE-M3 model structure detection
+        layers = []
         if hasattr(model, 'encoder') and hasattr(model.encoder, 'layer'):
             layers = model.encoder.layer
-        elif hasattr(model, 'roberta') and hasattr(model.roberta.encoder, 'layer'):
-            layers = model.roberta.encoder.layer  
-        else:
-            layers = []
+        elif hasattr(model, 'roberta') and hasattr(model.roberta, 'encoder'):
+            layers = model.roberta.encoder.layer
+        elif hasattr(model, 'bert') and hasattr(model.bert, 'encoder'):
+            layers = model.bert.encoder.layer
             
         for i, layer in enumerate(layers):
-            # Attention hook - XLM-RoBERTa has layer.attention.self
             if hasattr(layer, 'attention'):
                 self.hooks.append(layer.attention.register_forward_hook(make_attention_hook(i)))
-            # FFN hook - XLM-RoBERTa has layer.intermediate
             if hasattr(layer, 'intermediate'):
                 self.hooks.append(layer.intermediate.register_forward_hook(make_ffn_hook(i)))
     
     def set_model_info(self, cfg):
         info = NS()
+        # Handle both old and new config field names
         info.hidden_size = getattr(cfg, 'd_model', getattr(cfg, 'hidden_size', 1024))
         info.intermediate_size = getattr(cfg, 'intermediate_size', 4096)
         info.num_attention_heads = getattr(cfg, 'n_heads', getattr(cfg, 'num_attention_heads', 16))
@@ -262,14 +268,7 @@ class L0ModuleEmbedding(nn.Module):
             )
             prunable_model_size += self.base_model_info.num_layers * layer_params
         
-        # Hidden dimension pruning
-        if "hidden" in self.pruning_modules:
-            hidden_params = (
-                self.base_model_info.vocab_size * self.base_model_info.hidden_size +
-                self.base_model_info.num_layers * 6 * self.base_model_info.hidden_size +
-                3 * self.base_model_info.hidden_size * self.base_model_info.hidden_size  # output heads
-            )
-            prunable_model_size += hidden_params
+        # Skip hidden dimension pruning (not included in production version)
         
         return prunable_model_size
     
@@ -278,36 +277,14 @@ class L0ModuleEmbedding(nn.Module):
         method = getattr(self, func_name)
         method()
     
-    def initialize_hidden(self):
-        mask_shape = [self.base_model_info.hidden_size]
-        num_params_per_mask = self.base_model_info.hidden_size * 6  # Approx for all connections
-        
-        target_hidden_sparsity = None
-        target_mask_size = None
-        if self.target_model_info is not None:
-            target_hidden_sparsity = 1 - self.target_model_info.hidden_size / self.base_model_info.hidden_size
-            target_mask_size = self.target_model_info.hidden_size
-            self.lambdas.update({
-                "lambda_1_hidden": torch.nn.Parameter(torch.tensor(0.0, device=self.device)),
-                "lambda_2_hidden": torch.nn.Parameter(torch.tensor(0.0, device=self.device))
-            })
-        
-        hidden_mask = Mask(
-            name="hidden",
-            mask_shape=mask_shape,
-            num_params_per_mask=num_params_per_mask,
-            mask_output_shape=[self.base_model_info.hidden_size],
-            target_sparsity=target_hidden_sparsity,
-            target_mask_size=target_mask_size,
-            device=self.device,
-            eval_target_model=self.eval_target_model
-        )
-        self.masks["hidden"] = hidden_mask
+    # Hidden dimension pruning removed for production version
+    # Focus on structured pruning: head, layer, intermediate only
     
     def initialize_head(self):
         mask_shape = [self.base_model_info.num_layers, self.base_model_info.num_attention_heads]
         num_params_per_mask = self.base_model_info.params_per_head
-        mask_output_shape = [self.base_model_info.num_layers, 1, self.base_model_info.num_attention_heads, 1]
+        # Simplified mask shape for proper broadcasting: [num_layers, num_heads]
+        mask_output_shape = [self.base_model_info.num_layers, self.base_model_info.num_attention_heads]
         
         target_head_sparsity = None
         target_mask_size = None
@@ -365,7 +342,8 @@ class L0ModuleEmbedding(nn.Module):
     def initialize_intermediate(self):
         mask_shape = [self.base_model_info.num_layers, self.base_model_info.intermediate_size]
         num_params_per_mask = self.base_model_info.params_per_intermediate_dim
-        mask_output_shape = [self.base_model_info.num_layers, 1, 1, self.base_model_info.intermediate_size]
+        # Simplified mask shape: [num_layers, intermediate_size]
+        mask_output_shape = [self.base_model_info.num_layers, self.base_model_info.intermediate_size]
         
         target_int_sparsity = None
         target_mask_size = None

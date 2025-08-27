@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Clean BGE-M3 Pruning Training Script
-Minimal implementation with HuggingFace datasets
+Production BGE-M3 Pruning Training Script
+Focused on head/layer/intermediate pruning with MTEB support
 """
 
 import torch
@@ -15,7 +15,7 @@ sys.path.append(str(Path(__file__).parent))
 # Fix datasets import conflict by importing before local modules
 import datasets as hf_datasets
 
-from composer import Trainer
+from composer import Trainer, DataSpec
 from composer.utils import reproducibility
 from omegaconf import OmegaConf
 
@@ -24,12 +24,48 @@ from models.composer_bge_m3 import ComposerBGEM3
 from data_loader import create_dataloader
 from callbacks.pruning_callback import PruningCallback
 
+def get_num_samples_in_batch(batch):
+    """Get actual batch size from interleaved tensor pairs"""
+    return batch['input_ids'].size(0) // 2
+
+def split_batch(batch, microbatch_size):
+    """Custom batch splitting for interleaved sentence pairs"""
+    if microbatch_size is None:
+        return [batch]
+    
+    actual_batch_size = batch['input_ids'].size(0) // 2  # True batch size
+    if actual_batch_size <= microbatch_size:
+        return [batch]
+    
+    # Split into microbatches
+    microbatches = []
+    for start_idx in range(0, actual_batch_size, microbatch_size):
+        end_idx = min(start_idx + microbatch_size, actual_batch_size)
+        
+        # For interleaved tensors, we need indices: [start*2, start*2+1, ..., end*2-1]
+        interleaved_indices = []
+        for i in range(start_idx, end_idx):
+            interleaved_indices.extend([i * 2, i * 2 + 1])
+        
+        microbatch = {
+            'input_ids': batch['input_ids'][interleaved_indices],
+            'attention_mask': batch['attention_mask'][interleaved_indices],
+        }
+        
+        # Handle similarity_scores (has original batch dimension)
+        if 'similarity_scores' in batch:
+            microbatch['similarity_scores'] = batch['similarity_scores'][start_idx:end_idx]
+        
+        microbatches.append(microbatch)
+    
+    return microbatches
+
 def setup_optimizer(model, cfg):
-    """Setup three-group optimizer for L0 pruning"""
+    """Production optimizer with stable L0 learning rates"""
     if not hasattr(model, 'l0_module'):
         return torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     
-    # Three parameter groups
+    # Stable parameter groups for L0 pruning
     model_params = [p for n, p in model.named_parameters() 
                    if not n.startswith('l0_module') and p.requires_grad]
     mask_params = [p for p in model.l0_module.masks.parameters() if p.requires_grad]
@@ -37,8 +73,8 @@ def setup_optimizer(model, cfg):
     
     param_groups = [
         {'params': model_params, 'lr': cfg.lr, 'weight_decay': cfg.weight_decay},
-        {'params': mask_params, 'lr': cfg.lr * 10, 'weight_decay': 0.0},
-        {'params': lambda_params, 'lr': cfg.lr * 100, 'weight_decay': 0.0}
+        {'params': mask_params, 'lr': cfg.lr * 2, 'weight_decay': 0.0},  # Reduced from 10x
+        {'params': lambda_params, 'lr': cfg.lr * 5, 'weight_decay': 0.0}  # Reduced from 100x
     ]
     
     return torch.optim.AdamW(param_groups, betas=cfg.get('betas', [0.9, 0.999]), eps=cfg.get('eps', 1e-8))
@@ -47,8 +83,8 @@ def main():
     parser = argparse.ArgumentParser(description='BGE-M3 Pruning Training')
     parser.add_argument('config', type=str, help='Path to configuration file')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--dataset', type=str, default='sts', choices=['sts', 'msmarco'], 
-                       help='Dataset to use (sts or msmarco)')
+    parser.add_argument('--dataset', type=str, default='sts', 
+                       help='Dataset to use (sts, msmarco, or mteb/dataset-name)')
     
     args = parser.parse_args()
     
@@ -57,9 +93,10 @@ def main():
     
     # Load configuration
     cfg = OmegaConf.load(args.config)
-    print(f"🔥 BGE-M3 Pruning Training")
+    print(f"🔥 BGE-M3 Production Pruning Training")
     print(f"📁 Config: {args.config}")
     print(f"📊 Dataset: {args.dataset}")
+    print(f"🎯 Pruning: head/layer/intermediate only")
     
     # Setup model
     print("🚀 Loading BGE-M3 with L0 pruning...")
@@ -71,7 +108,7 @@ def main():
     print(f"📈 Total parameters: {total_params:,}")
     print(f"📈 Trainable parameters: {trainable_params:,}")
     
-    # Setup data
+    # Setup data with MTEB support
     print(f"📊 Loading {args.dataset} dataset from HuggingFace...")
     train_dataloader = create_dataloader(
         dataset_name=args.dataset,
@@ -80,11 +117,25 @@ def main():
         max_length=cfg.get('max_length', 512)
     )
     
+    # Use test split for datasets that don't have validation
+    eval_split = "validation" if args.dataset == "sts" else "test"
     eval_dataloader = create_dataloader(
         dataset_name=args.dataset,
-        split="validation",
+        split=eval_split,
         batch_size=cfg.get('batch_size', 16),
         max_length=cfg.get('max_length', 512)
+    )
+    
+    # Wrap dataloaders in DataSpec for Composer batch size detection and custom splitting
+    train_dataspec = DataSpec(
+        dataloader=train_dataloader, 
+        get_num_samples_in_batch=get_num_samples_in_batch,
+        split_batch=split_batch
+    )
+    eval_dataspec = DataSpec(
+        dataloader=eval_dataloader, 
+        get_num_samples_in_batch=get_num_samples_in_batch,
+        split_batch=split_batch
     )
     
     # Setup optimizer
@@ -105,11 +156,11 @@ def main():
         # Default fallback
         device = 'gpu' if torch.cuda.is_available() else 'cpu'
     
-    # Setup trainer
+    # Setup trainer with DataSpec for proper batch size detection
     trainer = Trainer(
         model=model,
-        train_dataloader=train_dataloader,
-        eval_dataloader=eval_dataloader,
+        train_dataloader=train_dataspec,
+        eval_dataloader=eval_dataspec,
         max_duration=cfg.max_duration,
         eval_interval=cfg.eval_interval,
         save_interval=cfg.get('save_interval', '500ba'),
@@ -124,11 +175,18 @@ def main():
     trainer.fit()
     
     # Print final results
-    final_params = sum(p.numel() for p in model.parameters())
-    reduction = (total_params - final_params) / total_params * 100
-    print(f"✅ Training completed!")
-    print(f"📉 Parameter reduction: {reduction:.1f}%")
-    print(f"💾 Final model size: {final_params:,} parameters")
+    print(f"✅ Production training completed!")
+    if hasattr(model, 'l0_module'):
+        zs = model.l0_module()
+        print(f"🎯 Pruning results:")
+        for mask_name, mask_tensor in zs.items():
+            sparsity = (mask_tensor == 0).float().mean().item()
+            print(f"  {mask_name}: {sparsity:.1%} sparsity")
+    
+    # Save pruned model in HuggingFace format
+    hf_save_path = cfg.get('save_folder', 'experiments/production') + '_hf'
+    model.save_pruned_hf_model(hf_save_path)
+    print(f"💾 Model ready for deployment")
 
 if __name__ == "__main__":
     main()

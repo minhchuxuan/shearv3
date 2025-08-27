@@ -5,7 +5,7 @@ from composer.models.base import ComposerModel
 from composer.utils import dist, get_device, reproducibility
 from omegaconf import DictConfig
 from typing import Dict, Optional, Any, Tuple
-from transformers import AutoModel, AutoConfig
+from transformers import AutoModel, AutoConfig, AutoTokenizer
 
 from .l0_module_embedding import L0ModuleEmbedding
 from .embedding_heads import BGEEmbeddingHeads
@@ -18,6 +18,7 @@ class ComposerBGEM3(ComposerModel):
         
         # Load pretrained BGE-M3 model and config
         model_name = getattr(cfg, 'base_model', 'BAAI/bge-m3')
+        self.base_model_name = model_name  # Store for HF export
         self.backbone = AutoModel.from_pretrained(model_name)
         self.config = self.backbone.config
         
@@ -86,95 +87,40 @@ class ComposerBGEM3(ComposerModel):
         return outputs if outputs is not None else self.forward(batch)
     
     def loss(self, outputs, batch):
-        """Compute loss for training"""
+        """Production loss computation with proper tensor handling"""
         embeddings = outputs['embeddings']
         l0_output = outputs['l0_output']
-        batch_size = outputs['batch_size']
-        
-        # Safety check for valid batch size
-        if batch_size <= 0:
-            return torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+        # Calculate batch size from interleaved tensor dimensions
+        batch_size = batch['input_ids'].size(0) // 2
         
         total_loss = 0.0
-        loss_dict = {}
         
-        # STS regression loss
-        if self.use_sts_loss and 'similarity_scores' in batch:
+        # Task-specific loss computation (infer task from batch contents)
+        if 'similarity_scores' in batch:
+            # STS task
             sts_loss = self.compute_sts_loss(embeddings, batch, batch_size)
             total_loss += sts_loss
-            loss_dict['sts_loss'] = sts_loss
-        
-        # Contrastive learning loss
-        if self.use_contrastive_loss and 'positive_ids' in batch:
-            contrastive_loss = self.compute_contrastive_loss(embeddings, batch, batch_size)
+        else:
+            # Retrieval task
+            contrastive_loss = self.compute_contrastive_loss(embeddings, batch_size)
             total_loss += contrastive_loss
-            loss_dict['contrastive_loss'] = contrastive_loss
         
-        # L0 sparsity loss and constraints
+        # L0 sparsity loss for pruning
         if hasattr(self.l0_module, 'get_sparsity_loss'):
             sparsity_loss, expected_sparsity, expected_score = self.l0_module.get_sparsity_loss()
-            
-            # Lagrangian constraints for target architecture
             constraint_loss = self.compute_constraint_loss(expected_sparsity)
-            
             total_loss += sparsity_loss + constraint_loss
-            loss_dict.update({
-                'sparsity_loss': sparsity_loss,
-                'constraint_loss': constraint_loss,
-            })
         
-        loss_dict['total_loss'] = total_loss
         return total_loss
     
     def compute_sts_loss(self, embeddings: Dict[str, torch.Tensor], batch: Dict[str, Any], batch_size: int) -> torch.Tensor:
-        """Compute STS regression loss"""
-        dense_emb = embeddings['dense_embedding']  # Shape: [actual_batch_size, embedding_dim]
+        """Production STS loss with proper paired sentence handling"""
+        dense_emb = embeddings['dense_embedding']  # [batch_size * 2, embedding_dim]
+        similarity_scores = batch['similarity_scores']  # [batch_size]
         
-        # Handle case where embedding might be flattened
-        if dense_emb.dim() == 1:
-            # Tensor is flattened, try to infer batch structure
-            embedding_dim = 1024  # BGE-M3 default
-            if dense_emb.size(0) % embedding_dim == 0:
-                actual_batch = dense_emb.size(0) // embedding_dim
-                dense_emb = dense_emb.view(actual_batch, embedding_dim)
-                batch_size = actual_batch
-            else:
-                # Fallback: create dummy loss
-                return torch.tensor(0.0, device=dense_emb.device, requires_grad=True)
-        
-        # Check if we have paired data or need to handle differently
-        if batch_size % 2 == 0 and 'similarity_scores' in batch:
-            # Paired sentence format
-            pair_batch_size = batch_size // 2
-            similarity_scores = batch['similarity_scores']
-            
-            if similarity_scores.size(0) == pair_batch_size and batch_size >= 2:
-                # Reshape embeddings for sentence pairs
-                dense_emb_reshaped = dense_emb.view(pair_batch_size, 2, -1)
-                sent1_emb = dense_emb_reshaped[:, 0, :]
-                sent2_emb = dense_emb_reshaped[:, 1, :]
-            elif batch_size >= 2:
-                # Interleaved format - take alternate indices
-                sent1_emb = dense_emb[0::2]  # Even indices
-                sent2_emb = dense_emb[1::2]  # Odd indices
-                similarity_scores = similarity_scores[:sent1_emb.size(0)]
-            else:
-                # Single sample fallback
-                sent1_emb = dense_emb[:1]
-                sent2_emb = dense_emb[:1]
-                similarity_scores = torch.ones(1, device=dense_emb.device)
-        else:
-            # Fallback: use first half vs second half
-            if batch_size >= 2:
-                mid = batch_size // 2
-                sent1_emb = dense_emb[:mid]
-                sent2_emb = dense_emb[mid:]
-                similarity_scores = batch.get('similarity_scores', torch.ones(mid, device=dense_emb.device))
-            else:
-                # Single sample case
-                sent1_emb = dense_emb
-                sent2_emb = dense_emb
-                similarity_scores = torch.ones(batch_size, device=dense_emb.device)
+        # Extract sentence pairs from interleaved format
+        sent1_emb = dense_emb[0::2]  # Even indices: first sentences [batch_size, embedding_dim]
+        sent2_emb = dense_emb[1::2]  # Odd indices: second sentences [batch_size, embedding_dim]
         
         # Compute cosine similarity
         predicted_sim = F.cosine_similarity(sent1_emb, sent2_emb, dim=-1)
@@ -183,18 +129,22 @@ class ComposerBGEM3(ComposerModel):
         predicted_sim = (predicted_sim + 1) * 2.5
         
         # MSE loss
-        sts_loss = F.mse_loss(predicted_sim, similarity_scores.float())
+        sts_loss = F.mse_loss(predicted_sim, similarity_scores)
         return sts_loss
     
-    def compute_contrastive_loss(self, embeddings: Dict[str, torch.Tensor], batch: Dict[str, Any], batch_size: int) -> torch.Tensor:
-        """Compute InfoNCE contrastive loss"""
-        dense_emb = embeddings['dense_embedding']  # [actual_batch_size, embedding_dim]
+    def compute_contrastive_loss(self, embeddings: Dict[str, torch.Tensor], batch_size: int) -> torch.Tensor:
+        """Production contrastive loss for query-passage pairs"""
+        dense_emb = embeddings['dense_embedding']  # [batch_size * 2, embedding_dim]
         
-        # Compute similarity matrix with proper tensor operations
-        similarity_matrix = torch.matmul(dense_emb, dense_emb.t()) / self.temperature
+        # Extract queries and passages from interleaved format
+        query_emb = dense_emb[0::2]  # Even indices: queries [batch_size, embedding_dim]
+        passage_emb = dense_emb[1::2]  # Odd indices: passages [batch_size, embedding_dim]
         
-        # Create labels - for contrastive learning, each sample is its own positive
-        labels = torch.arange(dense_emb.size(0), device=dense_emb.device)
+        # Compute similarity matrix: queries vs all passages
+        similarity_matrix = torch.matmul(query_emb, passage_emb.t()) / self.temperature
+        
+        # Labels: each query should match its corresponding passage (diagonal)
+        labels = torch.arange(batch_size, device=query_emb.device)
         
         # InfoNCE loss
         contrastive_loss = F.cross_entropy(similarity_matrix, labels)
@@ -295,3 +245,54 @@ class ComposerBGEM3(ComposerModel):
         # This would copy only the non-pruned weights
         # Implementation depends on specific pruning strategy
         pass
+    
+    def save_pruned_hf_model(self, save_path: str, tokenizer_name: str = None):
+        """Save pruned model in HuggingFace format for production use"""
+        import os
+        from pathlib import Path
+        
+        # Ensure save directory exists
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+        
+        # Get L0 masks and apply them
+        zs = self.l0_module()
+        
+        # Print pruning results
+        print("\n🎯 Applying pruning masks...")
+        for mask_name, mask_tensor in zs.items():
+            sparsity = (mask_tensor == 0).float().mean().item()
+            print(f"  {mask_name}: {sparsity:.1%} sparsity")
+        
+        # Apply masks to backbone (this modifies the model in-place)
+        self.l0_module.register_masking_hooks(self.backbone)
+        
+        # Save the backbone model in HuggingFace format
+        print(f"\n💾 Saving backbone model to {save_path}")
+        self.backbone.save_pretrained(save_path)
+        
+        # Save tokenizer
+        tokenizer_name = tokenizer_name or getattr(self, 'tokenizer_name', 'BAAI/bge-m3')
+        print(f"💾 Saving tokenizer from {tokenizer_name}")
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        tokenizer.save_pretrained(save_path)
+        
+        # Save pruning info
+        pruning_info = {
+            'pruning_results': {name: float((mask == 0).float().mean()) for name, mask in zs.items()},
+            'target_config': {
+                'n_layers': getattr(self.l0_module.target_model_info, 'num_layers', None),
+                'n_heads': getattr(self.l0_module.target_model_info, 'num_attention_heads', None),
+                'intermediate_size': getattr(self.l0_module.target_model_info, 'intermediate_size', None),
+            },
+            'base_model': getattr(self, 'base_model_name', 'BAAI/bge-m3')
+        }
+        
+        import json
+        with open(os.path.join(save_path, 'pruning_info.json'), 'w') as f:
+            json.dump(pruning_info, f, indent=2)
+        
+        print(f"✅ Pruned model saved in HuggingFace format!")
+        print(f"📁 Location: {save_path}")
+        print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
+        
+        return save_path

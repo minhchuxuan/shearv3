@@ -1,32 +1,35 @@
 """
-Unified HuggingFace Dataset Loader for BGE-M3 Pruning
-Clean, minimal implementation using datasets library
+Production BGE-M3 Dataset Loader with MTEB Support
+Clean implementation for STS similarity and MTEB retrieval tasks
 """
 
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
-# Import HuggingFace datasets explicitly to avoid local module conflict
 import datasets
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 class BGEDataset(torch.utils.data.Dataset):
-    """Unified dataset for BGE-M3 training with HuggingFace datasets"""
+    """Production dataset for BGE-M3 training with proper tensor handling"""
     
     def __init__(self, dataset_name: str, split: str = "train", 
                  tokenizer_name: str = "BAAI/bge-m3", max_length: int = 512):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.max_length = max_length
         
-        # Load dataset from HuggingFace
+        # Production dataset loading
         if dataset_name == "sts":
             self.dataset = datasets.load_dataset("mteb/stsbenchmark-sts", split=split)
             self.task_type = "similarity"
         elif dataset_name == "msmarco":
             self.dataset = datasets.load_dataset("ms_marco", "v1.1", split=split)
             self.task_type = "retrieval"
+        elif dataset_name.startswith("mteb/"):
+            # MTEB benchmark datasets
+            self.dataset = datasets.load_dataset(dataset_name, split=split)
+            self.task_type = "retrieval"
         else:
-            raise ValueError(f"Unsupported dataset: {dataset_name}")
+            raise ValueError(f"Unsupported dataset: {dataset_name}. Supported: sts, msmarco, mteb/*")
     
     def __len__(self) -> int:
         return len(self.dataset)
@@ -35,7 +38,7 @@ class BGEDataset(torch.utils.data.Dataset):
         item = self.dataset[idx]
         
         if self.task_type == "similarity":
-            # STS format: sentence1, sentence2, score - process separately
+            # STS: Clean sentence pair processing
             inputs1 = self.tokenizer(
                 item['sentence1'], max_length=self.max_length,
                 padding='max_length', truncation=True, return_tensors='pt'
@@ -46,68 +49,69 @@ class BGEDataset(torch.utils.data.Dataset):
             )
             
             return {
-                'input_ids_1': inputs1['input_ids'],  # Keep [1, seq_length] 
-                'attention_mask_1': inputs1['attention_mask'],  # Keep [1, seq_length]
-                'input_ids_2': inputs2['input_ids'],  # Keep [1, seq_length]
-                'attention_mask_2': inputs2['attention_mask'],  # Keep [1, seq_length]
-                'similarity_scores': torch.tensor(item['score'], dtype=torch.float),
+                'input_ids_1': inputs1['input_ids'].squeeze(0),  # [seq_length]
+                'attention_mask_1': inputs1['attention_mask'].squeeze(0),  # [seq_length]
+                'input_ids_2': inputs2['input_ids'].squeeze(0),  # [seq_length]
+                'attention_mask_2': inputs2['attention_mask'].squeeze(0),  # [seq_length]
+                'similarity_score': torch.tensor(item['score'], dtype=torch.float),
                 'task_type': 'sts'
             }
         
         else:  # retrieval
-            # MS MARCO format: query, passage - process separately  
+            # MTEB/MSMARCO: Clean query-passage processing
+            query_key = 'query' if 'query' in item else 'question'
+            passage_key = 'passage' if 'passage' in item else 'text' if 'text' in item else 'positive_passages'
+            
             query_inputs = self.tokenizer(
-                item['query'], max_length=self.max_length,
+                item[query_key], max_length=self.max_length,
                 padding='max_length', truncation=True, return_tensors='pt'
             )
             passage_inputs = self.tokenizer(
-                item['passage'], max_length=self.max_length,
-                padding='max_length', truncation=True, return_tensors='pt'
+                item[passage_key][0] if isinstance(item[passage_key], list) else item[passage_key], 
+                max_length=self.max_length, padding='max_length', truncation=True, return_tensors='pt'
             )
             
             return {
-                'input_ids_1': query_inputs['input_ids'],  # Keep [1, seq_length]
-                'attention_mask_1': query_inputs['attention_mask'],  # Keep [1, seq_length]
-                'input_ids_2': passage_inputs['input_ids'],  # Keep [1, seq_length]
-                'attention_mask_2': passage_inputs['attention_mask'],  # Keep [1, seq_length]
-                'labels': torch.tensor(1, dtype=torch.long),  # Positive pair
+                'input_ids_1': query_inputs['input_ids'].squeeze(0),  # [seq_length]
+                'attention_mask_1': query_inputs['attention_mask'].squeeze(0),  # [seq_length]
+                'input_ids_2': passage_inputs['input_ids'].squeeze(0),  # [seq_length]
+                'attention_mask_2': passage_inputs['attention_mask'].squeeze(0),  # [seq_length]
                 'task_type': 'retrieval'
             }
 
 def create_dataloader(dataset_name: str, split: str = "train", batch_size: int = 16, 
                      tokenizer_name: str = "BAAI/bge-m3", max_length: int = 512,
                      num_workers: int = 2) -> DataLoader:
-    """Create DataLoader for BGE-M3 training"""
+    """Create production DataLoader with proper tensor handling"""
     dataset = BGEDataset(dataset_name, split, tokenizer_name, max_length)
     
     def collate_fn(batch):
-        """Custom collate function - clean approach maintaining 2D tensors"""
-        # Each item has tensors of shape [1, seq_length], concatenate them
-        input_ids_1 = torch.cat([item['input_ids_1'] for item in batch], dim=0)  # [batch_size, seq_length]
-        attention_mask_1 = torch.cat([item['attention_mask_1'] for item in batch], dim=0)  # [batch_size, seq_length]
-        input_ids_2 = torch.cat([item['input_ids_2'] for item in batch], dim=0)  # [batch_size, seq_length]
-        attention_mask_2 = torch.cat([item['attention_mask_2'] for item in batch], dim=0)  # [batch_size, seq_length]
+        """Production collate function - maintains paired structure"""
+        # Stack tensors to create proper batch dimensions
+        input_ids_1 = torch.stack([item['input_ids_1'] for item in batch])  # [batch_size, seq_length]
+        attention_mask_1 = torch.stack([item['attention_mask_1'] for item in batch])  # [batch_size, seq_length]
+        input_ids_2 = torch.stack([item['input_ids_2'] for item in batch])  # [batch_size, seq_length]
+        attention_mask_2 = torch.stack([item['attention_mask_2'] for item in batch])  # [batch_size, seq_length]
         
-        # Concatenate to create [batch_size * 2, seq_length] for transformer
-        input_ids = torch.cat([input_ids_1, input_ids_2], dim=0)
-        attention_mask = torch.cat([attention_mask_1, attention_mask_2], dim=0)
+        # Interleave pairs: [sent1_1, sent2_1, sent1_2, sent2_2, ...]
+        batch_size = len(batch)
+        input_ids = torch.zeros(batch_size * 2, input_ids_1.size(1), dtype=input_ids_1.dtype)
+        attention_mask = torch.zeros(batch_size * 2, attention_mask_1.size(1), dtype=attention_mask_1.dtype)
+        
+        input_ids[0::2] = input_ids_1  # Even indices: first sentences
+        input_ids[1::2] = input_ids_2  # Odd indices: second sentences
+        attention_mask[0::2] = attention_mask_1
+        attention_mask[1::2] = attention_mask_2
         
         result = {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
         }
         
-        # Add task-specific fields - expand to match input_ids dimension
+        # Add task-specific targets (infer task from data, no string fields for Composer)
         if batch[0]['task_type'] == 'sts':
-            similarity_scores = torch.stack([item['similarity_scores'] for item in batch])
-            # Expand to [batch_size * 2] to match input_ids first dimension
-            similarity_scores_expanded = similarity_scores.repeat_interleave(2)
-            result['similarity_scores'] = similarity_scores_expanded
-        else:
-            labels = torch.stack([item['labels'] for item in batch])
-            # Expand to [batch_size * 2] to match input_ids first dimension  
-            labels_expanded = labels.repeat_interleave(2)
-            result['labels'] = labels_expanded
+            similarity_scores = torch.stack([item['similarity_score'] for item in batch])
+            result['similarity_scores'] = similarity_scores
         
         return result
     
