@@ -22,7 +22,7 @@ class BGEDataset(torch.utils.data.Dataset):
             self.dataset = datasets.load_dataset("mteb/stsbenchmark-sts", split=split)
             self.task_type = "similarity"
         elif dataset_name == "msmarco":
-            self.dataset = datasets.load_dataset("ms_marco", "v1.1", split=split)
+            self.dataset = datasets.load_dataset("ms_marco", "v2.1", split=split)
             self.task_type = "retrieval"
         elif dataset_name.startswith("mteb/"):
             # MTEB benchmark datasets

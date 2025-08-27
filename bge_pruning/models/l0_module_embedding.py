@@ -134,14 +134,9 @@ class L0ModuleEmbedding(nn.Module):
         
         self.masks = nn.ModuleDict()
         self.lambdas = nn.ParameterDict()
-        self.hooks = []  # Store hooks for cleanup
         
         for module_name in self.pruning_modules:
             self.initialize_one_module(module_name)
-            
-        # Register hooks on pretrained model if provided
-        if pretrained_model:
-            self.register_masking_hooks(pretrained_model)
     
     def extract_model_info(self, model):
         """Extract model configuration from pretrained model"""
@@ -161,43 +156,7 @@ class L0ModuleEmbedding(nn.Module):
         info.params_per_mlp_layer = info.hidden_size * info.intermediate_size + info.intermediate_size * info.hidden_size
         return info
     
-    def register_masking_hooks(self, model):
-        """Register production hooks for L0 mask application"""
-        def make_attention_hook(layer_idx):
-            def hook(module, args, output):
-                if hasattr(self, 'current_masks') and 'head_z' in self.current_masks:
-                    head_mask = self.current_masks['head_z'][layer_idx]  # Shape: [num_heads]
-                    if isinstance(output, tuple) and len(output) > 0:
-                        hidden_states = output[0]
-                        # Apply head mask during attention computation
-                        # This is a simplified approach - in production, mask should be applied to Q, K, V
-                        output = (hidden_states, *output[1:])
-                return output
-            return hook
-        
-        def make_ffn_hook(layer_idx):
-            def hook(module, args, output):
-                if hasattr(self, 'current_masks') and 'intermediate_z' in self.current_masks:
-                    int_mask = self.current_masks['intermediate_z'][layer_idx]  # Shape: [intermediate_size]
-                    # Apply intermediate dimension mask
-                    output = output * int_mask.view(1, 1, -1)
-                return output
-            return hook
-        
-        # BGE-M3 model structure detection
-        layers = []
-        if hasattr(model, 'encoder') and hasattr(model.encoder, 'layer'):
-            layers = model.encoder.layer
-        elif hasattr(model, 'roberta') and hasattr(model.roberta, 'encoder'):
-            layers = model.roberta.encoder.layer
-        elif hasattr(model, 'bert') and hasattr(model.bert, 'encoder'):
-            layers = model.bert.encoder.layer
-            
-        for i, layer in enumerate(layers):
-            if hasattr(layer, 'attention'):
-                self.hooks.append(layer.attention.register_forward_hook(make_attention_hook(i)))
-            if hasattr(layer, 'intermediate'):
-                self.hooks.append(layer.intermediate.register_forward_hook(make_ffn_hook(i)))
+
     
     def set_model_info(self, cfg):
         info = NS()
@@ -387,25 +346,10 @@ class L0ModuleEmbedding(nn.Module):
         zs = {}
         for mask_name, mask in self.masks.items():
             zs[f"{mask_name}_z"] = mask()
-        
-        # Store current masks for hooks
-        self.current_masks = zs
         return zs
     
     def constrain_parameters(self):
         for mask in self.masks.values():
             mask.constrain_parameters()
     
-    def cleanup_hooks(self):
-        """Remove all registered hooks"""
-        if hasattr(self, 'hooks'):
-            for hook in self.hooks:
-                hook.remove()
-            self.hooks.clear()
-    
-    def __del__(self):
-        """Cleanup hooks when module is destroyed"""
-        try:
-            self.cleanup_hooks()
-        except:
-            pass  # Ignore errors during cleanup
+

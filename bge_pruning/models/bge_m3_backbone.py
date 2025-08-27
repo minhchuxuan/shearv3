@@ -75,6 +75,8 @@ class MaskedXLMRobertaAttention(nn.Module):
         value_layer = self.transpose_for_scores(mixed_value_layer)
 
         if head_z is not None:
+            # Reshape for broadcasting: [num_heads] → [1, num_heads, 1, 1]
+            head_z = head_z.view(1, -1, 1, 1)
             query_layer = query_layer * head_z
             key_layer = key_layer * head_z
             value_layer = value_layer * head_z
@@ -134,13 +136,8 @@ class MaskedXLMRobertaOutput(nn.Module):
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, 
                 hidden_z: Optional[torch.Tensor] = None, 
                 intermediate_z: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if intermediate_z is not None:
-            remaining_index = torch.where(~intermediate_z.eq(0))[0]
-            compressed_hidden_states = torch.index_select(hidden_states, dim=-1, index=remaining_index)
-        else:
-            compressed_hidden_states = hidden_states
-
-        hidden_states = self.dense(compressed_hidden_states)
+        # intermediate_z already applied in intermediate layer, no compression needed
+        hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         
         if hidden_z is not None:
@@ -384,11 +381,63 @@ class MaskedBGEM3Backbone(nn.Module):
                     layer.attention.prune_heads(pruned_heads)
 
         if "hidden_z" in zs:
-            # This would require more complex pruning of all linear layers
-            # For now, we just apply the mask during forward pass
-            pass
+            # Prune hidden dimensions across all linear layers
+            hidden_mask = zs["hidden_z"]
+            remaining_idx = torch.where(hidden_mask > 0)[0]
+            
+            for layer in self.encoder.layer:
+                # Prune attention Q, K, V projections (input dimension)
+                if hasattr(layer, 'attention') and hasattr(layer.attention, 'self'):
+                    attn = layer.attention.self
+                    for proj in ['query', 'key', 'value']:
+                        if hasattr(attn, proj):
+                            old_weight = getattr(attn, proj).weight.data
+                            new_proj = nn.Linear(len(remaining_idx), old_weight.size(0))
+                            new_proj.weight.data = old_weight[:, remaining_idx]
+                            setattr(attn, proj, new_proj)
+                
+                # Prune attention output projection (output dimension)
+                if hasattr(layer, 'attention') and hasattr(layer.attention, 'output'):
+                    old_weight = layer.attention.output.dense.weight.data
+                    old_bias = layer.attention.output.dense.bias.data
+                    layer.attention.output.dense = nn.Linear(old_weight.size(1), len(remaining_idx))
+                    layer.attention.output.dense.weight.data = old_weight[remaining_idx]
+                    layer.attention.output.dense.bias.data = old_bias[remaining_idx]
+                
+                # Prune MLP input/output projections
+                if hasattr(layer, 'intermediate') and hasattr(layer.intermediate, 'dense'):
+                    old_weight = layer.intermediate.dense.weight.data
+                    new_dense = nn.Linear(len(remaining_idx), old_weight.size(0))
+                    new_dense.weight.data = old_weight[:, remaining_idx]
+                    layer.intermediate.dense = new_dense
+                
+                if hasattr(layer, 'output') and hasattr(layer.output, 'dense'):
+                    old_bias = layer.output.dense.bias.data
+                    new_dense = nn.Linear(layer.output.dense.weight.size(1), len(remaining_idx))
+                    new_dense.weight.data = layer.output.dense.weight.data[remaining_idx]
+                    new_dense.bias.data = old_bias[remaining_idx]
+                    layer.output.dense = new_dense
+            
+            # Update config
+            self.config.hidden_size = len(remaining_idx)
 
         if "intermediate_z" in zs:
-            # This would require pruning intermediate layers
-            # For now, we just apply the mask during forward pass
-            pass
+            # Prune intermediate dimensions in MLP layers
+            intermediate_mask = zs["intermediate_z"]
+            for i, layer in enumerate(self.encoder.layer):
+                if i < intermediate_mask.shape[0]:
+                    layer_int_mask = intermediate_mask[i]
+                    remaining_idx = torch.where(layer_int_mask > 0)[0]
+                    
+                    # Prune intermediate layers
+                    if hasattr(layer, 'intermediate') and hasattr(layer.intermediate, 'dense'):
+                        old_weight = layer.intermediate.dense.weight.data
+                        old_bias = layer.intermediate.dense.bias.data
+                        layer.intermediate.dense = nn.Linear(old_weight.size(1), len(remaining_idx))
+                        layer.intermediate.dense.weight.data = old_weight[remaining_idx]
+                        layer.intermediate.dense.bias.data = old_bias[remaining_idx]
+                    
+                    if hasattr(layer, 'output') and hasattr(layer.output, 'dense'):
+                        old_weight = layer.output.dense.weight.data
+                        layer.output.dense = nn.Linear(len(remaining_idx), old_weight.size(0))
+                        layer.output.dense.weight.data = old_weight[:, remaining_idx]

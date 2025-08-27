@@ -9,6 +9,7 @@ from transformers import AutoModel, AutoConfig, AutoTokenizer
 
 from .l0_module_embedding import L0ModuleEmbedding
 from .embedding_heads import BGEEmbeddingHeads
+from .bge_m3_backbone import MaskedBGEM3Backbone
 
 class ComposerBGEM3(ComposerModel):
     """BGE-M3 model with L0 pruning and Composer interface"""
@@ -19,8 +20,12 @@ class ComposerBGEM3(ComposerModel):
         # Load pretrained BGE-M3 model and config
         model_name = getattr(cfg, 'base_model', 'BAAI/bge-m3')
         self.base_model_name = model_name  # Store for HF export
-        self.backbone = AutoModel.from_pretrained(model_name)
-        self.config = self.backbone.config
+        base_model = AutoModel.from_pretrained(model_name)
+        self.config = base_model.config
+        
+        # Create masked backbone with original config
+        self.backbone = MaskedBGEM3Backbone(self.config)
+        self.backbone.load_state_dict(base_model.state_dict(), strict=False)
         
         # Override config with custom settings if provided
         if hasattr(cfg, 'd_model'):
@@ -59,18 +64,22 @@ class ComposerBGEM3(ComposerModel):
         # Get actual batch size from tensor
         actual_batch_size = input_ids.size(0)
         
-        # Get L0 masks and set them for hooks
+        # Get L0 masks
         l0_output = self.l0_module()
         
-        # Forward through pretrained backbone (hooks will apply masks)
+        # Forward through masked backbone with L0 masks
         backbone_outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            layer_z=l0_output.get('layer_z'),
+            head_z=l0_output.get('head_z'),
+            hidden_z=l0_output.get('hidden_z'),
+            intermediate_z=l0_output.get('intermediate_z'),
         )
         
         # Get embeddings from heads
         embedding_outputs = self.embedding_heads(
-            hidden_states=backbone_outputs.last_hidden_state,
+            hidden_states=backbone_outputs["last_hidden_state"],
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
@@ -155,19 +164,18 @@ class ComposerBGEM3(ComposerModel):
         constraint_loss = 0.0
         
         for mask_name, sparsity in expected_sparsity.items():
-            if mask_name in self.l0_module.lambdas:
-                lambda_1_name = f"lambda_1_{mask_name}"
-                lambda_2_name = f"lambda_2_{mask_name}"
-                
-                if lambda_1_name in self.l0_module.lambdas:
-                    constraint_loss += self.l0_module.lambdas[lambda_1_name] * sparsity.mean()
-                
-                if lambda_2_name in self.l0_module.lambdas:
-                    target_mask = getattr(self.l0_module.masks[mask_name], 'target_mask_size', None)
-                    if target_mask is not None:
-                        current_size = (1 - sparsity.mean()) * self.l0_module.masks[mask_name].mask_size
-                        size_diff = current_size - target_mask
-                        constraint_loss += self.l0_module.lambdas[lambda_2_name] * size_diff
+            lambda_1_name = f"lambda_1_{mask_name}"
+            lambda_2_name = f"lambda_2_{mask_name}"
+            
+            if lambda_1_name in self.l0_module.lambdas:
+                constraint_loss += self.l0_module.lambdas[lambda_1_name] * sparsity.mean()
+            
+            if lambda_2_name in self.l0_module.lambdas and mask_name in self.l0_module.masks:
+                mask = self.l0_module.masks[mask_name]
+                if hasattr(mask, 'target_mask_size') and mask.target_mask_size is not None:
+                    current_size = (1 - sparsity.mean()) * mask.mask_size
+                    size_diff = current_size - mask.target_mask_size
+                    constraint_loss += self.l0_module.lambdas[lambda_2_name] * size_diff
         
         return constraint_loss
     
@@ -263,8 +271,7 @@ class ComposerBGEM3(ComposerModel):
             sparsity = (mask_tensor == 0).float().mean().item()
             print(f"  {mask_name}: {sparsity:.1%} sparsity")
         
-        # Apply masks to backbone (this modifies the model in-place)
-        self.l0_module.register_masking_hooks(self.backbone)
+        # Masks are already applied during forward pass
         
         # Save the backbone model in HuggingFace format
         print(f"\n💾 Saving backbone model to {save_path}")
