@@ -114,11 +114,13 @@ class ComposerBGEM3(ComposerModel):
             contrastive_loss = self.compute_contrastive_loss(embeddings, batch_size)
             total_loss += contrastive_loss
         
-        # L0 sparsity loss for pruning
+        # L0 sparsity loss for pruning (scaled to balance with task loss)
         if hasattr(self.l0_module, 'get_sparsity_loss'):
             sparsity_loss, expected_sparsity, expected_score = self.l0_module.get_sparsity_loss()
             constraint_loss = self.compute_constraint_loss(expected_sparsity)
-            total_loss += sparsity_loss + constraint_loss
+            # Scale pruning losses to match task loss magnitude (typically 1-5)
+            pruning_weight = 10.0  # Amplify small sparsity losses to be significant
+            total_loss += pruning_weight * (sparsity_loss + constraint_loss)
         
         return total_loss
     
@@ -164,18 +166,14 @@ class ComposerBGEM3(ComposerModel):
         constraint_loss = 0.0
         
         for mask_name, sparsity in expected_sparsity.items():
-            lambda_1_name = f"lambda_1_{mask_name}"
-            lambda_2_name = f"lambda_2_{mask_name}"
-            
-            if lambda_1_name in self.l0_module.lambdas:
-                constraint_loss += self.l0_module.lambdas[lambda_1_name] * sparsity.mean()
-            
-            if lambda_2_name in self.l0_module.lambdas and mask_name in self.l0_module.masks:
+            if mask_name in self.l0_module.masks:
                 mask = self.l0_module.masks[mask_name]
-                if hasattr(mask, 'target_mask_size') and mask.target_mask_size is not None:
-                    current_size = (1 - sparsity.mean()) * mask.mask_size
-                    size_diff = current_size - mask.target_mask_size
-                    constraint_loss += self.l0_module.lambdas[lambda_2_name] * size_diff
+                
+                # Use target sparsity if available (more stable than lambda multipliers)
+                if hasattr(mask, 'target_sparsity') and mask.target_sparsity is not None:
+                    # Absolute difference penalty - always positive, encourages convergence
+                    sparsity_violation = torch.abs(sparsity.mean() - mask.target_sparsity)
+                    constraint_loss += sparsity_violation
         
         return constraint_loss
     

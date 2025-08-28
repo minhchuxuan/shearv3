@@ -16,6 +16,7 @@ class PruningCallback(Callback):
         
         if self.step_count % self.log_interval == 0:
             self._log_pruning_metrics(state, logger)
+            self._update_lagrangian_multipliers(state)
     
     def _log_pruning_metrics(self, state: State, logger: Logger) -> None:
         """Log pruning-specific metrics"""
@@ -25,13 +26,19 @@ class PruningCallback(Callback):
             return
             
         l0_module = model.l0_module
+        
+        # Constrain parameters to valid ranges
+        l0_module.constrain_parameters()
+        
         metrics = {}
         
-        # Log sparsity for each mask
-        for mask_name, mask in l0_module.masks.items():
-            if hasattr(mask, 'calculate_expected_score_sparsity'):
-                score, sparsity = mask.calculate_expected_score_sparsity()
-                metrics[f'sparsity/{mask_name}'] = sparsity.mean().item()
+        # Log actual sparsity using deterministic masks (same as final results)
+        zs = l0_module()
+        for mask_name, mask_tensor in zs.items():
+            # Remove '_z' suffix and calculate actual sparsity
+            base_name = mask_name.replace('_z', '')
+            sparsity = (mask_tensor == 0).float().mean().item()
+            metrics[f'sparsity/{base_name}'] = sparsity
         
         # Log to console
         sparsity_str = ", ".join([f"{k.split('/')[-1]}: {v:.3f}" for k, v in metrics.items()])

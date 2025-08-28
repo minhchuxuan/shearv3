@@ -351,5 +351,9 @@ class L0ModuleEmbedding(nn.Module):
     def constrain_parameters(self):
         for mask in self.masks.values():
             mask.constrain_parameters()
+        
+        # Constrain lambda parameters to be non-negative
+        for param in self.lambdas.values():
+            param.data.clamp_(min=0.0)
     
 

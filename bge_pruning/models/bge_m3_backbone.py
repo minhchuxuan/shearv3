@@ -361,6 +361,34 @@ class MaskedBGEM3Backbone(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
+    
+    def save_pretrained(self, save_path: str):
+        """Save model in HuggingFace format"""
+        import os
+        from pathlib import Path
+        
+        # Ensure save directory exists
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+        
+        # Save model state dict in PyTorch format
+        model_path = os.path.join(save_path, "pytorch_model.bin")
+        torch.save(self.state_dict(), model_path)
+        
+        # Save config
+        config_dict = {
+            "hidden_size": self.config.hidden_size,
+            "num_hidden_layers": self.config.num_hidden_layers,
+            "num_attention_heads": self.config.num_attention_heads,
+            "intermediate_size": self.config.intermediate_size,
+            "vocab_size": getattr(self.config, 'vocab_size', 250002),
+            "model_type": "xlm-roberta",
+            "architectures": ["XLMRobertaModel"],
+        }
+        
+        import json
+        config_path = os.path.join(save_path, "config.json")
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2)
 
     def prune_params(self, zs: Dict[str, torch.Tensor]):
         """Prune parameters based on masks"""
