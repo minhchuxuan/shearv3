@@ -11,9 +11,16 @@ class FinetuneBGEM3(nn.Module):
         super().__init__()
         
         # Load pruned model from HuggingFace format
-        self.config = AutoConfig.from_pretrained(model_path)
-        self.backbone = AutoModel.from_pretrained(model_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        try:
+            self.config = AutoConfig.from_pretrained(model_path)
+            self.backbone = AutoModel.from_pretrained(model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        except Exception as e:
+            raise ValueError(
+                f"Could not load model from {model_path}. "
+                f"If using a .pt checkpoint, first convert it using: "
+                f"python bge_pruning/scripts/extract_for_finetune.py checkpoint.pt output_dir"
+            ) from e
         
         # Model parameters
         self.temperature = temperature

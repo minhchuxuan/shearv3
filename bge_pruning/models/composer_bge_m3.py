@@ -271,7 +271,8 @@ class ComposerBGEM3(ComposerModel):
             sparsity = (mask_tensor == 0).float().mean().item()
             print(f"  {mask_name}: {sparsity:.1%} sparsity")
         
-        # Masks are already applied during forward pass
+        # Actually remove pruned parameters
+        self.prune_params(zs)
         
         # Save the backbone model in HuggingFace format
         print(f"\n💾 Saving backbone model to {save_path}")

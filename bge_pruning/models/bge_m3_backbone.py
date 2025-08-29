@@ -402,11 +402,17 @@ class MaskedBGEM3Backbone(nn.Module):
         if "head_z" in zs:
             # Prune attention heads
             head_mask = zs["head_z"]
+            total_remaining_heads = 0
             for i, layer in enumerate(self.encoder.layer):
                 if i < head_mask.shape[0]:
                     layer_head_mask = head_mask[i].squeeze()
                     pruned_heads = [j for j, mask in enumerate(layer_head_mask) if mask == 0]
                     layer.attention.prune_heads(pruned_heads)
+                    total_remaining_heads += layer.attention.self.num_attention_heads
+            
+            # Update global config with average heads per layer
+            if len(self.encoder.layer) > 0:
+                self.config.num_attention_heads = total_remaining_heads // len(self.encoder.layer)
 
         if "hidden_z" in zs:
             # Prune hidden dimensions across all linear layers
@@ -452,10 +458,12 @@ class MaskedBGEM3Backbone(nn.Module):
         if "intermediate_z" in zs:
             # Prune intermediate dimensions in MLP layers
             intermediate_mask = zs["intermediate_z"]
+            total_remaining_intermediate = 0
             for i, layer in enumerate(self.encoder.layer):
                 if i < intermediate_mask.shape[0]:
                     layer_int_mask = intermediate_mask[i]
                     remaining_idx = torch.where(layer_int_mask > 0)[0]
+                    total_remaining_intermediate += len(remaining_idx)
                     
                     # Prune intermediate layers
                     if hasattr(layer, 'intermediate') and hasattr(layer.intermediate, 'dense'):
@@ -469,3 +477,7 @@ class MaskedBGEM3Backbone(nn.Module):
                         old_weight = layer.output.dense.weight.data
                         layer.output.dense = nn.Linear(len(remaining_idx), old_weight.size(0))
                         layer.output.dense.weight.data = old_weight[:, remaining_idx]
+            
+            # Update global config with average intermediate size per layer
+            if len(self.encoder.layer) > 0:
+                self.config.intermediate_size = total_remaining_intermediate // len(self.encoder.layer)
