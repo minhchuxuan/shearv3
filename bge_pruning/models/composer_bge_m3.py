@@ -77,11 +77,13 @@ class ComposerBGEM3(ComposerModel):
             intermediate_z=l0_output.get('intermediate_z'),
         )
         
-        # Get embeddings from heads
+        # Get embeddings from heads (dense only for training efficiency)
         embedding_outputs = self.embedding_heads(
             hidden_states=backbone_outputs["last_hidden_state"],
             input_ids=input_ids,
             attention_mask=attention_mask,
+            return_sparse=False,
+            return_multi_vector=False,
         )
         
         return {

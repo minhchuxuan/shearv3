@@ -35,7 +35,7 @@ class Mask(nn.Module):
         self.eval_target_model = eval_target_model
         
     def param_init_fn(self, module):
-        mean = 5
+        mean = 0
         if isinstance(module, nn.Parameter):
             module.data.normal_(mean, 1e-2)
         else:
@@ -101,9 +101,9 @@ class Mask(nn.Module):
         self.z_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
 
     def calculate_expected_score_sparsity(self):
-        score = 1 - self.cdf_qz()
-        sparsity = 1 - score.sum(-1) / self.mask_size
-        return score, sparsity
+        soft_mask = torch.sigmoid(self.z_loga / self.temperature * self.magical_number)
+        sparsity = 1 - soft_mask.mean(dim=-1)
+        return soft_mask, sparsity
 
 class L0ModuleEmbedding(nn.Module):
     def __init__(self, cfg, device, pretrained_model=None):

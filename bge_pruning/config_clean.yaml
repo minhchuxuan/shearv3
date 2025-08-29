@@ -5,7 +5,7 @@ model:
   base_model: "BAAI/bge-m3"
   use_sts_loss: true
   use_contrastive_loss: true
-  temperature: 0.02
+  temperature: 0.07
   
   l0_module:
     # Production pruning: head, layer, intermediate only
