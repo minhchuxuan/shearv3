@@ -30,10 +30,11 @@ class Mask(nn.Module):
         self.beta = 0.83  # Hard Concrete temperature parameter
         self.device = device
         
-        self.z_loga = self.initialize_mask(mask_shape) 
-        self.mask_size = self.z_loga.shape[-1]
         self.target_mask_size = target_mask_size
         self.eval_target_model = eval_target_model
+        
+        self.z_loga = self.initialize_mask(mask_shape) 
+        self.mask_size = self.z_loga.shape[-1]
         
     def param_init_fn(self, module):
         mean = 0
