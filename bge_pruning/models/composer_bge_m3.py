@@ -261,6 +261,10 @@ class ComposerBGEM3(ComposerModel):
         # Ensure save directory exists
         Path(save_path).mkdir(parents=True, exist_ok=True)
         
+        # Set to eval mode for deterministic pruning
+        was_training = self.training
+        self.eval()
+        
         # Get L0 masks and apply them
         zs = self.l0_module()
         
@@ -301,6 +305,10 @@ class ComposerBGEM3(ComposerModel):
         print(f"✅ Pruned model saved in HuggingFace format!")
         print(f"📁 Location: {save_path}")
         print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
+        
+        # Restore original training mode
+        if was_training:
+            self.train()
         
         return save_path
     

@@ -27,6 +27,7 @@ class Mask(nn.Module):
         self.droprate_init = 0.5
         self.temperature = 2./3.
         self.magical_number = 0.8
+        self.beta = 0.83  # Hard Concrete temperature parameter
         self.device = device
         
         self.z_loga = self.initialize_mask(mask_shape) 
@@ -44,7 +45,16 @@ class Mask(nn.Module):
     
     def initialize_mask(self, mask_shape):
         z_loga = nn.Parameter(torch.zeros(mask_shape, device=self.device))
-        self.param_init_fn(z_loga)
+        
+        # Target-aware initialization to bias toward target architecture
+        if self.target_mask_size is not None and mask_shape[-1] > 0:
+            target_keep_prob = self.target_mask_size / mask_shape[-1]
+            target_keep_prob = max(0.01, min(0.99, target_keep_prob))  # Clamp to valid range
+            alpha_init = math.log(target_keep_prob / (1 - target_keep_prob))
+            z_loga.data.fill_(alpha_init)
+        else:
+            self.param_init_fn(z_loga)
+        
         return z_loga
     
     def cdf_qz(self, x=None):
@@ -53,19 +63,26 @@ class Mask(nn.Module):
         xn = (x - limit_a) / (limit_b - limit_a)
         return torch.clamp(xn, 0, 1)
     
-    def quantile_concrete(self, x):
-        y = torch.sigmoid((torch.log(x / (1 - x)) + self.z_loga) / self.temperature)
-        return y * (limit_b - limit_a) + limit_a
-    
     def sample_z(self):
+        # Hard Concrete distribution sampling
         eps = torch.rand_like(self.z_loga)
-        z = self.quantile_concrete(eps)
-        return torch.clamp(z, 0, 1)
+        eps = torch.clamp(eps, epsilon, 1 - epsilon)  # Avoid log(0)
+        
+        # Step 1: Sample from logistic distribution
+        s = torch.sigmoid((torch.log(eps / (1 - eps)) + self.z_loga) / self.beta)
+        
+        # Step 2: Stretch to [γ, ζ] range (limit_a, limit_b)
+        s_stretched = s * (limit_b - limit_a) + limit_a
+        
+        # Step 3: Hard clamp to [0, 1] - this creates the "hard" concrete distribution
+        z = torch.clamp(s_stretched, 0, 1)
+        
+        return z
     
     def _deterministic_z(self, z_loga):
         # Use target_mask_size for exact pruning, fallback to sparsity
         if self.target_mask_size is not None:
-            num_zeros = max(0, self.mask_size - self.target_mask_size)
+            num_zeros = max(0, z_loga.shape[-1] - self.target_mask_size)
         elif self.target_sparsity is not None:
             num_zeros = int(self.target_sparsity * z_loga.shape[-1])
         else:
@@ -98,7 +115,14 @@ class Mask(nn.Module):
         self.z_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
 
     def calculate_expected_score_sparsity(self):
-        soft_mask = torch.sigmoid(self.z_loga / self.temperature * self.magical_number)
+        # Use Hard Concrete distribution for expected score calculation
+        # This aligns soft sparsity calculation with actual sampling behavior
+        s = torch.sigmoid(self.z_loga / self.beta)
+        s_stretched = s * (limit_b - limit_a) + limit_a
+        
+        # Expected value after hard clamp [0,1]
+        # P(z=0) when s_stretched <= 0, P(z=1) when s_stretched >= 1
+        soft_mask = torch.clamp(s_stretched, 0, 1)
         sparsity = 1 - soft_mask.mean(dim=-1)
         return soft_mask, sparsity
 
@@ -244,7 +268,7 @@ class L0ModuleEmbedding(nn.Module):
         
         target_head_sparsity = None
         target_mask_size = None
-        if self.target_model_info is not None:
+        if self.target_model_info is not None and hasattr(self.target_model_info, 'num_attention_heads'):
             target_head_sparsity = 1 - self.target_model_info.num_attention_heads / self.base_model_info.num_attention_heads
             target_mask_size = self.target_model_info.num_attention_heads
             self.lambdas.update({
@@ -275,7 +299,7 @@ class L0ModuleEmbedding(nn.Module):
         
         target_layer_sparsity = None
         target_mask_size = None
-        if self.target_model_info is not None:
+        if self.target_model_info is not None and hasattr(self.target_model_info, 'num_layers'):
             target_layer_sparsity = 1 - self.target_model_info.num_layers / self.base_model_info.num_layers
             target_mask_size = self.target_model_info.num_layers
             self.lambdas.update({
@@ -303,7 +327,7 @@ class L0ModuleEmbedding(nn.Module):
         
         target_int_sparsity = None
         target_mask_size = None
-        if self.target_model_info is not None:
+        if self.target_model_info is not None and hasattr(self.target_model_info, 'intermediate_size'):
             target_int_sparsity = 1 - self.target_model_info.intermediate_size / self.base_model_info.intermediate_size
             target_mask_size = self.target_model_info.intermediate_size
             self.lambdas.update({

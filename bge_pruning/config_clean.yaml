@@ -14,7 +14,7 @@ model:
     lagrangian_warmup_steps: "1000ba"
     eval_target_model: true
     
-    # Target architecture for 75% reduction (production setting)
+    # Target architecture for 50% reduction (production setting)
     target_model:
       n_layers: 12  # From 24
       n_heads: 8   # From 16
