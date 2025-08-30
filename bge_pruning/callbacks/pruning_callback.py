@@ -78,7 +78,8 @@ class PruningCallback(Callback):
     
     def _adjust_lagrangian_multipliers(self, l0_module) -> None:
         """Adjust Lagrangian multipliers based on constraint satisfaction"""
-        learning_rate = 0.01  # Lagrangian multiplier learning rate
+        learning_rate = 0.001  # Reduced learning rate for stability
+        max_lambda = 10.0  # Maximum multiplier value to prevent explosion
         
         for param_name, param in l0_module.lambdas.items():
             if param_name.startswith("lambda_1_"):
@@ -91,7 +92,7 @@ class PruningCallback(Callback):
                     if mask.target_sparsity is not None:
                         violation = sparsity.mean() - mask.target_sparsity
                         param.data += learning_rate * violation
-                        param.data.clamp_(min=0.0)  # Keep non-negative
+                        param.data.clamp_(min=0.0, max=max_lambda)
     
     def _compute_constraint_violations(self, l0_module) -> float:
         """Compute total constraint violations"""

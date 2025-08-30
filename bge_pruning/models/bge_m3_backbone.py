@@ -58,17 +58,11 @@ class MaskedXLMRobertaAttention(nn.Module):
         head_mask: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = False,
         head_z: Optional[torch.Tensor] = None,
-        hidden_z: Optional[torch.Tensor] = None,
     ) -> tuple:
-        if hidden_z is not None:
-            remaining_index = torch.where(~hidden_z.eq(0))[0]
-            compressed_hidden_states = torch.index_select(hidden_states, dim=-1, index=remaining_index)
-        else:
-            compressed_hidden_states = hidden_states
 
-        mixed_query_layer = self.query(compressed_hidden_states)
-        mixed_key_layer = self.key(compressed_hidden_states)
-        mixed_value_layer = self.value(compressed_hidden_states)
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
         key_layer = self.transpose_for_scores(mixed_key_layer)
@@ -98,9 +92,6 @@ class MaskedXLMRobertaAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
 
-        if hidden_z is not None:
-            context_layer = context_layer * hidden_z
-
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
         return outputs
 
@@ -110,15 +101,9 @@ class MaskedXLMRobertaIntermediate(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         self.intermediate_act_fn = F.gelu
 
-    def forward(self, hidden_states: torch.Tensor, hidden_z: Optional[torch.Tensor] = None, 
+    def forward(self, hidden_states: torch.Tensor, 
                 intermediate_z: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if hidden_z is not None:
-            remaining_index = torch.where(~hidden_z.eq(0))[0]
-            compressed_hidden_states = torch.index_select(hidden_states, dim=-1, index=remaining_index)
-        else:
-            compressed_hidden_states = hidden_states
-
-        hidden_states = self.dense(compressed_hidden_states)
+        hidden_states = self.dense(hidden_states)
         
         if intermediate_z is not None:
             hidden_states = hidden_states * intermediate_z
@@ -133,17 +118,9 @@ class MaskedXLMRobertaOutput(nn.Module):
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, 
-                hidden_z: Optional[torch.Tensor] = None, 
-                intermediate_z: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # intermediate_z already applied in intermediate layer, no compression needed
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        
-        if hidden_z is not None:
-            hidden_states = hidden_states * hidden_z
-            input_tensor = input_tensor * hidden_z
-
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
@@ -163,7 +140,6 @@ class MaskedXLMRobertaLayer(nn.Module):
         head_mask: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = False,
         head_z: Optional[torch.Tensor] = None,
-        hidden_z: Optional[torch.Tensor] = None,
         intermediate_z: Optional[torch.Tensor] = None,
     ) -> tuple:
         self_attention_outputs = self.attention(
@@ -172,20 +148,19 @@ class MaskedXLMRobertaLayer(nn.Module):
             head_mask,
             output_attentions=output_attentions,
             head_z=head_z,
-            hidden_z=hidden_z,
         )
         attention_output = self_attention_outputs[0]
 
         outputs = self_attention_outputs[1:]
 
-        layer_output = self.feed_forward_chunk(attention_output, hidden_z, intermediate_z)
+        layer_output = self.feed_forward_chunk(attention_output, intermediate_z)
         outputs = (layer_output,) + outputs
 
         return outputs
 
-    def feed_forward_chunk(self, attention_output, hidden_z=None, intermediate_z=None):
-        intermediate_output = self.intermediate(attention_output, hidden_z, intermediate_z)
-        layer_output = self.output(intermediate_output, attention_output, hidden_z, intermediate_z)
+    def feed_forward_chunk(self, attention_output, intermediate_z=None):
+        intermediate_output = self.intermediate(attention_output, intermediate_z)
+        layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
 class MaskedXLMRobertaEncoder(nn.Module):
@@ -205,7 +180,6 @@ class MaskedXLMRobertaEncoder(nn.Module):
         return_dict: Optional[bool] = True,
         layer_z: Optional[torch.Tensor] = None,
         head_z: Optional[torch.Tensor] = None,
-        hidden_z: Optional[torch.Tensor] = None,
         intermediate_z: Optional[torch.Tensor] = None,
     ) -> tuple:
         all_hidden_states = () if output_hidden_states else None
@@ -229,7 +203,6 @@ class MaskedXLMRobertaEncoder(nn.Module):
                 head_mask[i] if head_mask is not None else None,
                 output_attentions,
                 layer_head_z,
-                hidden_z,
                 layer_intermediate_z,
             )
 
@@ -263,7 +236,6 @@ class MaskedBGEM3Backbone(nn.Module):
         return_dict: Optional[bool] = None,
         layer_z: Optional[torch.Tensor] = None,
         head_z: Optional[torch.Tensor] = None,
-        hidden_z: Optional[torch.Tensor] = None,
         intermediate_z: Optional[torch.Tensor] = None,
     ) -> tuple:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -306,9 +278,6 @@ class MaskedBGEM3Backbone(nn.Module):
             inputs_embeds=inputs_embeds,
         )
 
-        if hidden_z is not None:
-            embedding_output = embedding_output * hidden_z
-
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask,
@@ -318,7 +287,6 @@ class MaskedBGEM3Backbone(nn.Module):
             return_dict=return_dict,
             layer_z=layer_z,
             head_z=head_z,
-            hidden_z=hidden_z,
             intermediate_z=intermediate_z,
         )
         sequence_output = encoder_outputs[0]
@@ -410,50 +378,19 @@ class MaskedBGEM3Backbone(nn.Module):
                     layer.attention.prune_heads(pruned_heads)
                     total_remaining_heads += layer.attention.num_attention_heads
             
-            # Update global config with average heads per layer
+            # Update config ensuring mathematical consistency
             if len(self.encoder.layer) > 0:
-                self.config.num_attention_heads = total_remaining_heads // len(self.encoder.layer)
+                avg_heads = total_remaining_heads // len(self.encoder.layer)
+                # Ensure hidden_size is divisible by num_attention_heads
+                if self.config.hidden_size % avg_heads != 0:
+                    # Adjust to nearest valid head count that divides hidden_size
+                    for h in range(avg_heads, 0, -1):
+                        if self.config.hidden_size % h == 0:
+                            avg_heads = h
+                            break
+                self.config.num_attention_heads = avg_heads
 
-        if "hidden_z" in zs:
-            # Prune hidden dimensions across all linear layers
-            hidden_mask = zs["hidden_z"]
-            remaining_idx = torch.where(hidden_mask > 0)[0]
-            
-            for layer in self.encoder.layer:
-                # Prune attention Q, K, V projections (input dimension)
-                if hasattr(layer, 'attention') and hasattr(layer.attention, 'self'):
-                    attn = layer.attention.self
-                    for proj in ['query', 'key', 'value']:
-                        if hasattr(attn, proj):
-                            old_weight = getattr(attn, proj).weight.data
-                            new_proj = nn.Linear(len(remaining_idx), old_weight.size(0))
-                            new_proj.weight.data = old_weight[:, remaining_idx]
-                            setattr(attn, proj, new_proj)
-                
-                # Prune attention output projection (output dimension)
-                if hasattr(layer, 'attention') and hasattr(layer.attention, 'output'):
-                    old_weight = layer.attention.output.dense.weight.data
-                    old_bias = layer.attention.output.dense.bias.data
-                    layer.attention.output.dense = nn.Linear(old_weight.size(1), len(remaining_idx))
-                    layer.attention.output.dense.weight.data = old_weight[remaining_idx]
-                    layer.attention.output.dense.bias.data = old_bias[remaining_idx]
-                
-                # Prune MLP input/output projections
-                if hasattr(layer, 'intermediate') and hasattr(layer.intermediate, 'dense'):
-                    old_weight = layer.intermediate.dense.weight.data
-                    new_dense = nn.Linear(len(remaining_idx), old_weight.size(0))
-                    new_dense.weight.data = old_weight[:, remaining_idx]
-                    layer.intermediate.dense = new_dense
-                
-                if hasattr(layer, 'output') and hasattr(layer.output, 'dense'):
-                    old_bias = layer.output.dense.bias.data
-                    new_dense = nn.Linear(layer.output.dense.weight.size(1), len(remaining_idx))
-                    new_dense.weight.data = layer.output.dense.weight.data[remaining_idx]
-                    new_dense.bias.data = old_bias[remaining_idx]
-                    layer.output.dense = new_dense
-            
-            # Update config
-            self.config.hidden_size = len(remaining_idx)
+
 
         if "intermediate_z" in zs:
             # Prune intermediate dimensions in MLP layers

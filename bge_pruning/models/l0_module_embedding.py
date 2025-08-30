@@ -63,20 +63,17 @@ class Mask(nn.Module):
         return torch.clamp(z, 0, 1)
     
     def _deterministic_z(self, z_loga):
-        # Handle case where target_sparsity is None (no target specified)
-        if self.target_sparsity is not None:
-            expected_num_zeros = int((1 - (1 - self.target_sparsity)) * z_loga.shape[-1])
+        # Use target_mask_size for exact pruning, fallback to sparsity
+        if self.target_mask_size is not None:
+            num_zeros = max(0, self.mask_size - self.target_mask_size)
+        elif self.target_sparsity is not None:
+            num_zeros = int(self.target_sparsity * z_loga.shape[-1])
         else:
-            expected_num_zeros = 0  # No pruning if no target specified
-        
-        num_zeros = max(0, self.mask_size - self.target_mask_size) if self.target_mask_size else expected_num_zeros
+            num_zeros = 0
         
         soft_mask = torch.sigmoid(z_loga / self.temperature * self.magical_number)
         if num_zeros > 0:
-            if self.eval_target_model:
-                _, indices = torch.topk(z_loga, k=num_zeros, largest=False)
-            else:
-                _, indices = torch.topk(soft_mask, k=num_zeros, largest=False)
+            _, indices = torch.topk(z_loga, k=num_zeros, largest=False)
             soft_mask[indices] = 0.
         return soft_mask
     
@@ -125,8 +122,8 @@ class L0ModuleEmbedding(nn.Module):
                 hasattr(target_model_cfg, 'hidden_size')):
                 self.target_model_info = self.set_model_info(target_model_cfg)
         
-        # Focus on head/layer/intermediate pruning only (no hidden dimension)
-        self.pruning_modules = [m for m in l0_module_cfg.pruning_modules if m != 'hidden']
+        # Focus on head/layer/intermediate pruning only
+        self.pruning_modules = [m for m in l0_module_cfg.pruning_modules if m in ['head', 'layer', 'intermediate']]
         self.start_sparsity = l0_module_cfg.start_sparsity
         self.lagrangian_warmup_steps = Time.from_timestring(l0_module_cfg.lagrangian_warmup_steps).value
         self.device = device
@@ -336,7 +333,7 @@ class L0ModuleEmbedding(nn.Module):
             expected_sparsity[mask_name] = sparsity
             expected_score[mask_name] = score
             
-            if mask_name in ["hidden", "head", "layer", "intermediate"]:
+            if mask_name in ["head", "layer", "intermediate"]:
                 if mask.target_sparsity is not None:
                     sparsity_loss += torch.abs(sparsity.mean() - mask.target_sparsity)
         

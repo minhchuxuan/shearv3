@@ -43,6 +43,9 @@ class ComposerBGEM3(ComposerModel):
         if device_name == "gpu":
             device_name = "cuda" if torch.cuda.is_available() else "cpu"
         
+        # Validate configuration consistency
+        self._validate_config()
+        
         # Initialize L0 module for pruning with model info
         self.l0_module = L0ModuleEmbedding(cfg, device_name, self.backbone)
 
@@ -73,7 +76,6 @@ class ComposerBGEM3(ComposerModel):
             attention_mask=attention_mask,
             layer_z=l0_output.get('layer_z'),
             head_z=l0_output.get('head_z'),
-            hidden_z=l0_output.get('hidden_z'),
             intermediate_z=l0_output.get('intermediate_z'),
         )
         
@@ -194,10 +196,7 @@ class ComposerBGEM3(ComposerModel):
         # Prune backbone
         self.backbone.prune_params(zs)
         
-        # Prune embedding heads
-        hidden_z = zs.get('hidden_z', None)
-        if hidden_z is not None:
-            self.embedding_heads.prune_params(hidden_z)
+        # Note: Hidden dimension pruning removed for production version
     
     def get_model_info(self):
         """Get model architecture information"""
@@ -304,3 +303,12 @@ class ComposerBGEM3(ComposerModel):
         print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
         
         return save_path
+    
+    def _validate_config(self):
+        """Validate model configuration for mathematical consistency"""
+        if self.config.hidden_size % self.config.num_attention_heads != 0:
+            raise ValueError(
+                f"Hidden size ({self.config.hidden_size}) must be divisible by "
+                f"number of attention heads ({self.config.num_attention_heads}). "
+                f"Adjust configuration to use valid combinations."
+            )
