@@ -8,7 +8,11 @@ class STSDataset(Dataset):
     """STS benchmark dataset for finetuning using HuggingFace datasets"""
     
     def __init__(self, hf_dataset, tokenizer_path: str, max_length: int = 512):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        # Load tokenizer with fallback
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        except:
+            self.tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-m3')
         self.max_length = max_length
         self.data = self._process_hf_dataset(hf_dataset)
     
@@ -38,7 +42,7 @@ class STSDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.data[idx]
         
-        # Tokenize both sentences
+        # Tokenize both sentences individually  
         encoded1 = self.tokenizer(
             item['sentence1'],
             max_length=self.max_length,
@@ -55,15 +59,35 @@ class STSDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Interleave format: [sent1, sent2] for batch processing
-        input_ids = torch.cat([encoded1['input_ids'], encoded2['input_ids']], dim=0)
-        attention_mask = torch.cat([encoded1['attention_mask'], encoded2['attention_mask']], dim=0)
-        
+        # Store as separate tensors - will be interleaved in collate_fn
         return {
-            'input_ids': input_ids.squeeze(1),  # Remove extra dimension
-            'attention_mask': attention_mask.squeeze(1),
+            'input_ids_1': encoded1['input_ids'].squeeze(0),        # [seq_length]
+            'input_ids_2': encoded2['input_ids'].squeeze(0),        # [seq_length]
+            'attention_mask_1': encoded1['attention_mask'].squeeze(0),  # [seq_length]
+            'attention_mask_2': encoded2['attention_mask'].squeeze(0),  # [seq_length]
             'similarity_scores': torch.tensor(item['score'], dtype=torch.float)
         }
+
+def collate_fn(batch):
+    """Custom collate function to create interleaved format for STS training"""
+    batch_size = len(batch)
+    
+    # Stack tensors
+    input_ids_1 = torch.stack([item['input_ids_1'] for item in batch])       # [batch_size, seq_length]
+    input_ids_2 = torch.stack([item['input_ids_2'] for item in batch])       # [batch_size, seq_length]
+    attention_mask_1 = torch.stack([item['attention_mask_1'] for item in batch])  # [batch_size, seq_length]
+    attention_mask_2 = torch.stack([item['attention_mask_2'] for item in batch])  # [batch_size, seq_length]
+    similarity_scores = torch.stack([item['similarity_scores'] for item in batch])  # [batch_size]
+    
+    # Interleave: [sent1_batch1, sent2_batch1, sent1_batch2, sent2_batch2, ...]
+    input_ids = torch.cat([input_ids_1, input_ids_2], dim=0)                # [batch_size*2, seq_length]
+    attention_mask = torch.cat([attention_mask_1, attention_mask_2], dim=0)  # [batch_size*2, seq_length]
+    
+    return {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+        'similarity_scores': similarity_scores
+    }
 
 def create_sts_dataloader(
     split: str,
@@ -91,7 +115,8 @@ def create_sts_dataloader(
         batch_size=batch_size, 
         shuffle=shuffle, 
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=collate_fn
     )
 
 def load_sts_dataset():

@@ -3,7 +3,7 @@
 # Quick finetuning script for pruned BGE-M3 model
 # Usage: ./run_finetune.sh [model_path]
 
-MODEL_PATH=${1:-"../production_hf"}
+MODEL_PATH=${1:-"../bge_pruning/experiments_1nua/production_hf"}
 
 echo "🚀 Starting BGE-M3 Finetuning"
 echo "📁 Model path: $MODEL_PATH"

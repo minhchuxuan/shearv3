@@ -261,20 +261,24 @@ class ComposerBGEM3(ComposerModel):
     
     def save_pruned_hf_model(self, save_path: str, tokenizer_name: str = None):
         """Save pruned model in HuggingFace format for production use"""
+        import sys
         import os
         from pathlib import Path
         
-        # Ensure save directory exists
-        Path(save_path).mkdir(parents=True, exist_ok=True)
+        # Add project root to path for imports
+        project_root = Path(__file__).parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
         
-        # Use eval mode for deterministic masks based on learned importance
+        from utils.hf_export import save_backbone_as_hf_model
+        import json
+        
+        # Use eval mode for deterministic masks
         was_training = self.training
         self.eval()
         
-        # Get deterministic masks using learned z_loga rankings
+        # Get deterministic masks and apply pruning
         zs = self.l0_module()
-        
-        # Print pruning results
         print("\n🎯 Applying pruning masks...")
         for mask_name, mask_tensor in zs.items():
             sparsity = (mask_tensor == 0).float().mean().item()
@@ -282,36 +286,25 @@ class ComposerBGEM3(ComposerModel):
         
         # Actually remove pruned parameters
         self.prune_params(zs)
-        
-        # Validate pruned model configuration
         self._validate_pruned_model()
         
-        # Clean up L0 module for production deployment
-        l0_module_backup = self.l0_module
-        self.l0_module = None
-        
-        # Save the backbone model in HuggingFace format
-        print(f"\n💾 Saving backbone model to {save_path}")
-        self.backbone.save_pretrained(save_path)
-        
-        # Save tokenizer
-        tokenizer_name = tokenizer_name or getattr(self, 'tokenizer_name', 'BAAI/bge-m3')
-        print(f"💾 Saving tokenizer from {tokenizer_name}")
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        tokenizer.save_pretrained(save_path)
+        # Save backbone as proper HuggingFace model
+        print(f"\n💾 Saving pruned model to {save_path}")
+        base_model_name = tokenizer_name or getattr(self, 'base_model_name', 'BAAI/bge-m3')
+        save_backbone_as_hf_model(self.backbone, save_path, base_model_name)
         
         # Save pruning info
         pruning_info = {
             'pruning_results': {name: float((mask == 0).float().mean()) for name, mask in zs.items()},
-            'target_config': {
-                'n_layers': getattr(self.l0_module.target_model_info, 'num_layers', None),
-                'n_heads': getattr(self.l0_module.target_model_info, 'num_attention_heads', None),
-                'intermediate_size': getattr(self.l0_module.target_model_info, 'intermediate_size', None),
-            },
-            'base_model': getattr(self, 'base_model_name', 'BAAI/bge-m3')
+            'base_model': base_model_name,
+            'final_config': {
+                'num_hidden_layers': len(self.backbone.encoder.layer),
+                'num_attention_heads': self.backbone.encoder.layer[0].attention.num_attention_heads if len(self.backbone.encoder.layer) > 0 else 0,
+                'intermediate_size': self.backbone.encoder.layer[0].intermediate.dense.out_features if len(self.backbone.encoder.layer) > 0 else 0,
+                'hidden_size': self.config.hidden_size
+            }
         }
         
-        import json
         with open(os.path.join(save_path, 'pruning_info.json'), 'w') as f:
             json.dump(pruning_info, f, indent=2)
         
@@ -319,8 +312,7 @@ class ComposerBGEM3(ComposerModel):
         print(f"📁 Location: {save_path}")
         print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
         
-        # Restore L0 module and training mode
-        self.l0_module = l0_module_backup
+        # Restore training mode
         if was_training:
             self.train()
         

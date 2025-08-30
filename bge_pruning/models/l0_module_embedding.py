@@ -59,10 +59,17 @@ class Mask(nn.Module):
         return z_loga
     
     def cdf_qz(self, x=None):
+        """
+        CDF of Hard Concrete distribution - probability that output is 0
+        """
         if x is None:
             x = self.z_loga
-        xn = (x - limit_a) / (limit_b - limit_a)
-        return torch.clamp(xn, 0, 1)
+        # Threshold where stretched sigmoid becomes 0
+        threshold = -limit_a / (limit_b - limit_a)  # 0.1 / 1.2 ≈ 0.083
+        # Inverse sigmoid to find x value that gives this threshold
+        threshold_logit = math.log(threshold / (1 - threshold))
+        # CDF: P(output = 0) = P(x < threshold_logit * beta)
+        return torch.sigmoid((threshold_logit * self.beta - x) / self.beta)
     
     def sample_z(self):
         # Hard Concrete distribution sampling
@@ -81,18 +88,31 @@ class Mask(nn.Module):
         return z
     
     def _deterministic_z(self, z_loga):
-        # Use target_mask_size for exact pruning, fallback to sparsity
-        if self.target_mask_size is not None:
-            num_zeros = max(0, z_loga.shape[-1] - self.target_mask_size)
-        elif self.target_sparsity is not None:
-            num_zeros = int(self.target_sparsity * z_loga.shape[-1])
+        # CDF-based expected sparsity calculation
+        if self.target_mask_size is not None and self.eval_target_model:
+            # Use exact target for final pruning
+            expected_num_zeros = z_loga.shape[-1] - self.target_mask_size
         else:
+            # Use CDF to compute expected sparsity from learned distribution
+            expected_score = 1 - self.cdf_qz(z_loga)  # Probability of keeping
+            expected_num_nonzeros = expected_score.sum()
+            expected_num_zeros = z_loga.nelement() - expected_num_nonzeros.item()
+        
+        try:
+            num_zeros = round(expected_num_zeros)
+        except:
+            print("num of zeros is nan....")
             num_zeros = 0
+            
+        num_zeros = max(0, min(num_zeros, z_loga.shape[-1]))
         
         soft_mask = torch.sigmoid(z_loga / self.temperature * self.magical_number)
         if num_zeros > 0:
-            _, indices = torch.topk(z_loga, k=num_zeros, largest=False)
-            soft_mask[indices] = 0.
+            if soft_mask.ndim == 0:
+                soft_mask = torch.tensor(0).to(z_loga.device)
+            else:
+                _, indices = torch.topk(z_loga, k=num_zeros, largest=False)
+                soft_mask[indices] = 0.
         return soft_mask
     
     def deterministic_z(self):
@@ -116,14 +136,10 @@ class Mask(nn.Module):
         self.z_loga.data.clamp_(min=math.log(1e-2), max=math.log(1e2))
 
     def calculate_expected_score_sparsity(self):
-        # Use Hard Concrete distribution for expected score calculation
-        # This aligns soft sparsity calculation with actual sampling behavior
-        s = torch.sigmoid(self.z_loga / self.beta)
-        s_stretched = s * (limit_b - limit_a) + limit_a
-        
-        # Expected value after hard clamp [0,1]
-        # P(z=0) when s_stretched <= 0, P(z=1) when s_stretched >= 1
-        soft_mask = torch.clamp(s_stretched, 0, 1)
+        # CDF-based expected score calculation
+        # Use same method as _deterministic_z for consistency
+        expected_score = 1 - self.cdf_qz(self.z_loga)  # Probability of keeping
+        soft_mask = expected_score
         sparsity = 1 - soft_mask.mean(dim=-1)
         return soft_mask, sparsity
 

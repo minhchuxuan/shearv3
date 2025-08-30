@@ -1,7 +1,7 @@
 # Configuration for finetuning pruned BGE-M3 on STS dataset
 
-# Model settings
-model_path: "../production_hf"  # Path to pruned model directory
+# Model settings  
+model_path: "../bge_pruning/experiments_1nua/production_hf"  # Path to pruned model directory
 temperature: 0.02
 
 # Training settings

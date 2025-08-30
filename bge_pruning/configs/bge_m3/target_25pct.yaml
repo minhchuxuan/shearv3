@@ -14,11 +14,11 @@ model:
     lagrangian_warmup_steps: "1000ba"
     eval_target_model: true
     
-    # Target architecture for 50% reduction (production setting)
+    # Target architecture for 25% reduction (light pruning)
     target_model:
-      n_layers: 12  # From 24
-      n_heads: 8   # From 16
-      intermediate_size: 2048  # From 4096
+      n_layers: 18  # From 24 (25% reduction)
+      n_heads: 12   # From 16 (25% reduction)
+      intermediate_size: 3072  # From 4096 (25% reduction)
 
 optimizer:
   # Stable learning rates for production
@@ -33,7 +33,7 @@ max_length: 512
 max_duration: "10000ba"
 eval_interval: "500ba"
 save_interval: "1000ba"
-save_folder: "experiments/production"
+save_folder: "experiments/production_25pct"
 seed: 42
 device: gpu
 precision: "amp_bf16"

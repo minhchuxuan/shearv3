@@ -188,8 +188,19 @@ def main():
                        help='Number of last layers to unfreeze (0 = freeze all, -1 = unfreeze all)')
     parser.add_argument('--device', type=str, default='auto',
                        help='Device to use (auto, cuda, cpu)')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Random seed for reproducibility')
     
     args = parser.parse_args()
+    
+    # Set all random seeds for reproducibility
+    torch.manual_seed(args.seed)
+    import numpy as np
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     
     # Set device
     if args.device == 'auto':

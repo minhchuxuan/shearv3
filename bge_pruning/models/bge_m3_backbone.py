@@ -342,14 +342,19 @@ class MaskedBGEM3Backbone(nn.Module):
         model_path = os.path.join(save_path, "pytorch_model.bin")
         torch.save(self.state_dict(), model_path)
         
-        # Save config with actual embedding vocab_size
+        # Save config with actual embedding dimensions
         actual_vocab_size = self.embeddings.word_embeddings.weight.shape[0]
+        actual_max_pos = self.embeddings.position_embeddings.weight.shape[0]
+        actual_type_vocab = self.embeddings.token_type_embeddings.weight.shape[0]
+        
         config_dict = {
             "hidden_size": self.config.hidden_size,
             "num_hidden_layers": self.config.num_hidden_layers,
             "num_attention_heads": self.config.num_attention_heads,
             "intermediate_size": self.config.intermediate_size,
             "vocab_size": actual_vocab_size,
+            "max_position_embeddings": actual_max_pos,
+            "type_vocab_size": actual_type_vocab,
             "model_type": "xlm-roberta",
             "architectures": ["XLMRobertaModel"],
         }
