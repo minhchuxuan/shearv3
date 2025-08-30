@@ -408,7 +408,7 @@ class MaskedBGEM3Backbone(nn.Module):
                     layer_head_mask = head_mask[i].squeeze()
                     pruned_heads = [j for j, mask in enumerate(layer_head_mask) if mask == 0]
                     layer.attention.prune_heads(pruned_heads)
-                    total_remaining_heads += layer.attention.self.num_attention_heads
+                    total_remaining_heads += layer.attention.num_attention_heads
             
             # Update global config with average heads per layer
             if len(self.encoder.layer) > 0:

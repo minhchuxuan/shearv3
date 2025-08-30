@@ -11,28 +11,28 @@ model:
     # Production pruning: head, layer, intermediate only
     pruning_modules: ["layer", "head", "intermediate"]
     start_sparsity: 0.0
-    lagrangian_warmup_steps: "500ba"
+    lagrangian_warmup_steps: "1000ba"
     eval_target_model: true
     
     # Target architecture for 75% reduction (production setting)
     target_model:
-      n_layers: 18  # From 24
-      n_heads: 12   # From 16
-      intermediate_size: 3072  # From 4096
+      n_layers: 12  # From 24
+      n_heads: 8   # From 16
+      intermediate_size: 2048  # From 4096
 
 optimizer:
   # Stable learning rates for production
-  lr: 2.0e-5
+  lr: 7.0e-6
   betas: [0.9, 0.999]
   eps: 1.0e-8
   weight_decay: 0.01
 
 # Training settings
-batch_size: 32
+batch_size: 16
 max_length: 512
-max_duration: "5000ba"
-eval_interval: "250ba"
-save_interval: "500ba"
+max_duration: "10000ba"
+eval_interval: "500ba"
+save_interval: "1000ba"
 save_folder: "experiments/production"
 seed: 42
 device: gpu
