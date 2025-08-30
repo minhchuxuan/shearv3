@@ -273,6 +273,10 @@ class ComposerBGEM3(ComposerModel):
         # Actually remove pruned parameters
         self.prune_params(zs)
         
+        # Sync config vocab_size with actual embedding dimensions before saving NEW EDIT 308
+        actual_vocab_size = self.backbone.embeddings.word_embeddings.weight.shape[0]
+        self.backbone.config.vocab_size = actual_vocab_size
+        
         # Save the backbone model in HuggingFace format
         print(f"\n💾 Saving backbone model to {save_path}")
         self.backbone.save_pretrained(save_path)
