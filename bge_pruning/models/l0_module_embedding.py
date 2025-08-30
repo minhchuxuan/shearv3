@@ -153,11 +153,28 @@ class L0ModuleEmbedding(nn.Module):
         self.device = device
         self.eval_target_model = l0_module_cfg.get("eval_target_model", True)
         
+        # LLM-Shearing style sparsity warmup (20% of total training for warmup)
+        self.sparsity_warmup_steps = int(0.2 * Time.from_timestring("12000ba").value)  # 20% of 12000 steps
+        self.current_step = 0
+        
         self.masks = nn.ModuleDict()
         self.lambdas = nn.ParameterDict()
         
         for module_name in self.pruning_modules:
             self.initialize_one_module(module_name)
+    
+    def update_training_step(self, step: int):
+        """Update current training step for sparsity warmup"""
+        self.current_step = step
+    
+    def get_warmup_target_sparsity(self, final_target_sparsity: float) -> float:
+        """LLM-Shearing style sparsity warmup: 0 → target over warmup period"""
+        if self.current_step >= self.sparsity_warmup_steps:
+            return final_target_sparsity
+        
+        # Linear warmup from 0 to final_target_sparsity
+        progress = self.current_step / self.sparsity_warmup_steps
+        return progress * final_target_sparsity
     
     def extract_model_info(self, model):
         """Extract model configuration from pretrained model"""

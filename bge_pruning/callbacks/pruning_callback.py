@@ -27,6 +27,10 @@ class PruningCallback(Callback):
             
         l0_module = model.l0_module
         
+        # Update current step for sparsity warmup
+        current_step = state.timestamp.batch.value if hasattr(state.timestamp, 'batch') else 0
+        l0_module.update_training_step(current_step)
+        
         # Constrain parameters to valid ranges
         l0_module.constrain_parameters()
         

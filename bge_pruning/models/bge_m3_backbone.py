@@ -362,11 +362,16 @@ class MaskedBGEM3Backbone(nn.Module):
     def prune_params(self, zs: Dict[str, torch.Tensor]):
         """Prune parameters based on masks"""
         if "layer_z" in zs:
-            # Remove pruned layers
+            # Remove pruned layers and make indices contiguous
             layer_mask = zs["layer_z"]
             remaining_layers = torch.where(layer_mask > 0)[0]
+            print(f"Pruning layers: keeping {len(remaining_layers)}/{len(layer_mask)} layers {remaining_layers.tolist()}")
+            
+            # Create new ModuleList with contiguous indices
             self.encoder.layer = nn.ModuleList([self.encoder.layer[i] for i in remaining_layers])
             self.config.num_hidden_layers = len(remaining_layers)
+            
+            print(f"New layer count: {self.config.num_hidden_layers} (indices now 0-{self.config.num_hidden_layers-1})")
 
         if "head_z" in zs:
             # Prune attention heads

@@ -123,7 +123,7 @@ class ComposerBGEM3(ComposerModel):
             sparsity_loss, expected_sparsity, expected_score = self.l0_module.get_sparsity_loss()
             constraint_loss = self.compute_constraint_loss(expected_sparsity)
             # Scale pruning losses to match task loss magnitude (typically 1-5)
-            pruning_weight = 10.0  # Amplify small sparsity losses to be significant
+            pruning_weight = 20.0  # Amplify small sparsity losses to be significant
             total_loss += pruning_weight * (sparsity_loss + constraint_loss)
         
         return total_loss
@@ -166,18 +166,24 @@ class ComposerBGEM3(ComposerModel):
         return contrastive_loss
     
     def compute_constraint_loss(self, expected_sparsity: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute Lagrangian constraint loss for target architecture"""
+        """LLM-Shearing style constraint loss with warmup and quadratic penalty"""
         constraint_loss = 0.0
         
         for mask_name, sparsity in expected_sparsity.items():
             if mask_name in self.l0_module.masks:
                 mask = self.l0_module.masks[mask_name]
                 
-                # Use target sparsity if available (more stable than lambda multipliers)
                 if hasattr(mask, 'target_sparsity') and mask.target_sparsity is not None:
-                    # Absolute difference penalty - always positive, encourages convergence
-                    sparsity_violation = torch.abs(sparsity.mean() - mask.target_sparsity)
-                    constraint_loss += sparsity_violation
+                    # Get warmup target sparsity (gradually increases from 0 to final target)
+                    current_target = self.l0_module.get_warmup_target_sparsity(mask.target_sparsity)
+                    
+                    # LLM-Shearing style: Linear + Quadratic penalty
+                    sparsity_diff = sparsity.mean() - current_target
+                    linear_penalty = torch.abs(sparsity_diff)
+                    quadratic_penalty = sparsity_diff ** 2
+                    
+                    # Combine linear + quadratic (quadratic is stronger for large violations)
+                    constraint_loss += linear_penalty + 5.0 * quadratic_penalty
         
         return constraint_loss
     
@@ -261,11 +267,11 @@ class ComposerBGEM3(ComposerModel):
         # Ensure save directory exists
         Path(save_path).mkdir(parents=True, exist_ok=True)
         
-        # Set to eval mode for deterministic pruning
+        # Use eval mode for deterministic masks based on learned importance
         was_training = self.training
         self.eval()
         
-        # Get L0 masks and apply them
+        # Get deterministic masks using learned z_loga rankings
         zs = self.l0_module()
         
         # Print pruning results
@@ -276,6 +282,13 @@ class ComposerBGEM3(ComposerModel):
         
         # Actually remove pruned parameters
         self.prune_params(zs)
+        
+        # Validate pruned model configuration
+        self._validate_pruned_model()
+        
+        # Clean up L0 module for production deployment
+        l0_module_backup = self.l0_module
+        self.l0_module = None
         
         # Save the backbone model in HuggingFace format
         print(f"\n💾 Saving backbone model to {save_path}")
@@ -306,7 +319,8 @@ class ComposerBGEM3(ComposerModel):
         print(f"📁 Location: {save_path}")
         print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
         
-        # Restore original training mode
+        # Restore L0 module and training mode
+        self.l0_module = l0_module_backup
         if was_training:
             self.train()
         
@@ -320,3 +334,24 @@ class ComposerBGEM3(ComposerModel):
                 f"number of attention heads ({self.config.num_attention_heads}). "
                 f"Adjust configuration to use valid combinations."
             )
+    
+    def _validate_pruned_model(self):
+        """Validate pruned model is in correct state for production use"""
+        # Validate backbone configuration
+        backbone_config = self.backbone.config
+        
+        # Check layer count consistency
+        actual_layers = len(self.backbone.encoder.layer)
+        config_layers = backbone_config.num_hidden_layers
+        if actual_layers != config_layers:
+            raise ValueError(f"Layer count mismatch: actual={actual_layers}, config={config_layers}")
+        
+        # Check attention head consistency
+        if backbone_config.hidden_size % backbone_config.num_attention_heads != 0:
+            raise ValueError(f"Invalid attention configuration after pruning: "
+                           f"hidden_size={backbone_config.hidden_size}, "
+                           f"num_attention_heads={backbone_config.num_attention_heads}")
+        
+        print(f"✅ Model validation passed: {actual_layers} layers, "
+              f"{backbone_config.num_attention_heads} heads, "
+              f"{backbone_config.intermediate_size} intermediate size")

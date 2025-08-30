@@ -71,10 +71,15 @@ def setup_optimizer(model, cfg):
     mask_params = [p for p in model.l0_module.masks.parameters() if p.requires_grad]
     lambda_params = [p for p in model.l0_module.lambdas.parameters() if p.requires_grad]
     
+    # LLM-Shearing style aggressive L0 learning rates
+    base_lr = cfg.lr  # 5e-5
+    l0_lr = 1.0       # Fixed high LR for L0 masks (1000x base)
+    lagrangian_lr = 1.0  # Fixed high LR for Lagrangian multipliers
+    
     param_groups = [
-        {'params': model_params, 'lr': cfg.lr, 'weight_decay': cfg.weight_decay},
-        {'params': mask_params, 'lr': cfg.lr * 2, 'weight_decay': 0.0},  # Reduced from 10x
-        {'params': lambda_params, 'lr': cfg.lr * 5, 'weight_decay': 0.0}  # Reduced from 100x
+        {'params': model_params, 'lr': base_lr, 'weight_decay': cfg.weight_decay},
+        {'params': mask_params, 'lr': l0_lr, 'weight_decay': 0.0},  # LLM-Shearing style
+        {'params': lambda_params, 'lr': lagrangian_lr, 'weight_decay': 0.0}  # LLM-Shearing style
     ]
     
     return torch.optim.AdamW(param_groups, betas=cfg.get('betas', [0.9, 0.999]), eps=cfg.get('eps', 1e-8))
