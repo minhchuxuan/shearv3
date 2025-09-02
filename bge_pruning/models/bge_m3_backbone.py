@@ -331,33 +331,31 @@ class MaskedBGEM3Backbone(nn.Module):
         return next(self.parameters()).dtype
     
     def save_pretrained(self, save_path: str):
-        """Save model in HuggingFace format"""
+        """Save model in HuggingFace format with proper key mapping"""
         import os
+        import sys
         from pathlib import Path
+        
+        # Add utils to path for conversion functions
+        project_root = Path(__file__).parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
+        from utils.hf_export import convert_backbone_to_hf_state_dict, create_hf_config_from_backbone
         
         # Ensure save directory exists
         Path(save_path).mkdir(parents=True, exist_ok=True)
         
-        # Save model state dict in PyTorch format
+        # Get state dict and convert keys to HF format
+        backbone_state_dict = self.state_dict()
+        hf_state_dict = convert_backbone_to_hf_state_dict(backbone_state_dict)
+        
+        # Save converted state dict
         model_path = os.path.join(save_path, "pytorch_model.bin")
-        torch.save(self.state_dict(), model_path)
+        torch.save(hf_state_dict, model_path)
         
-        # Save config with actual embedding dimensions
-        actual_vocab_size = self.embeddings.word_embeddings.weight.shape[0]
-        actual_max_pos = self.embeddings.position_embeddings.weight.shape[0]
-        actual_type_vocab = self.embeddings.token_type_embeddings.weight.shape[0]
-        
-        config_dict = {
-            "hidden_size": self.config.hidden_size,
-            "num_hidden_layers": self.config.num_hidden_layers,
-            "num_attention_heads": self.config.num_attention_heads,
-            "intermediate_size": self.config.intermediate_size,
-            "vocab_size": actual_vocab_size,
-            "max_position_embeddings": actual_max_pos,
-            "type_vocab_size": actual_type_vocab,
-            "model_type": "xlm-roberta",
-            "architectures": ["XLMRobertaModel"],
-        }
+        # Use the proper config builder
+        config_dict = create_hf_config_from_backbone(self)
         
         import json
         config_path = os.path.join(save_path, "config.json")

@@ -33,8 +33,15 @@ def create_hf_config_from_backbone(backbone):
     # Use first layer to get actual head count and intermediate size
     if actual_layers > 0:
         first_layer = backbone.encoder.layer[0]
-        actual_heads = first_layer.attention.num_attention_heads
         actual_intermediate = first_layer.intermediate.dense.out_features
+        
+        # Infer actual head count from weight dimensions (more reliable than stored config)
+        query_weight_shape = first_layer.attention.query.weight.shape
+        head_dim = config.hidden_size // config.num_attention_heads  # Original head dimension
+        actual_all_head_size = query_weight_shape[0]
+        actual_heads = actual_all_head_size // head_dim
+        
+        print(f"Config dimensions: layers={actual_layers}, heads={actual_heads}, intermediate={actual_intermediate}")
     else:
         actual_heads = config.num_attention_heads
         actual_intermediate = config.intermediate_size
@@ -83,6 +90,23 @@ def convert_backbone_to_hf_state_dict(backbone_state_dict):
             
         hf_state_dict[new_key] = value
     
+    # Add missing attention.output.dense layers as identity matrices
+    # The backbone concatenates attention heads without learned output projection
+    for key in list(hf_state_dict.keys()):
+        if ".attention.self.query.weight" in key:
+            # Extract layer number and create identity mapping
+            layer_prefix = key.replace(".attention.self.query.weight", "")
+            hidden_size = hf_state_dict[key].shape[0]  # Should equal all_head_size
+            
+            # Create identity weight and zero bias for missing output projection
+            output_weight_key = f"{layer_prefix}.attention.output.dense.weight"
+            output_bias_key = f"{layer_prefix}.attention.output.dense.bias"
+            
+            if output_weight_key not in hf_state_dict:
+                hf_state_dict[output_weight_key] = torch.eye(hidden_size, dtype=hf_state_dict[key].dtype)
+            if output_bias_key not in hf_state_dict:
+                hf_state_dict[output_bias_key] = torch.zeros(hidden_size, dtype=hf_state_dict[key].dtype)
+    
     return hf_state_dict
 
 
@@ -90,35 +114,32 @@ def save_backbone_as_hf_model(backbone, save_path, base_model_name="BAAI/bge-m3"
     """Save pruned backbone as HuggingFace XLM-RoBERTa model"""
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
-    # Create proper HF config
-    hf_config_dict = create_hf_config_from_backbone(backbone)
+    # Update backbone config to match actual pruned dimensions
+    actual_layers = len(backbone.encoder.layer)
+    if actual_layers > 0:
+        first_layer = backbone.encoder.layer[0]
+        actual_intermediate = first_layer.intermediate.dense.out_features
+        query_weight_shape = first_layer.attention.query.weight.shape
+        head_dim = backbone.config.hidden_size // backbone.config.num_attention_heads
+        actual_heads = query_weight_shape[0] // head_dim
+        
+        backbone.config.num_hidden_layers = actual_layers
+        backbone.config.num_attention_heads = actual_heads
+        backbone.config.intermediate_size = actual_intermediate
+        
+        print(f"Config: {actual_layers} layers, {actual_heads} heads, {actual_intermediate} intermediate")
+        
+        # Update layer attention configs
+        for layer in backbone.encoder.layer:
+            layer.attention.num_attention_heads = actual_heads
+            layer.attention.all_head_size = actual_heads * head_dim
     
-    # Create config from base model and update with pruned dimensions
-    config = AutoConfig.from_pretrained(base_model_name)
-    for key, value in hf_config_dict.items():
-        setattr(config, key, value)
-    
-    # Create fresh HF model with pruned config
-    hf_model = AutoModel.from_config(config)
-    
-    # Convert backbone state dict to HF format
-    backbone_state = backbone.state_dict()
-    hf_state_dict = convert_backbone_to_hf_state_dict(backbone_state)
-    
-    # Load weights into HF model
-    missing_keys, unexpected_keys = hf_model.load_state_dict(hf_state_dict, strict=False)
-    
-    # Report any remaining key mismatches
-    if len(missing_keys) > 0:
-        print(f"Warning: {len(missing_keys)} missing keys (may be normal for pruned model)")
-    if len(unexpected_keys) > 0:
-        print(f"Warning: {len(unexpected_keys)} unexpected keys (may be normal for custom backbone)")
-    
-    # Save model and config
-    hf_model.save_pretrained(save_path)
+    # Save backbone (handles conversion internally)
+    backbone.save_pretrained(save_path)
     
     # Save tokenizer
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     tokenizer.save_pretrained(save_path)
     
+    print(f"✅ Model saved to {save_path}")
     return save_path
