@@ -341,7 +341,7 @@ class MaskedBGEM3Backbone(nn.Module):
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
         
-        from utils.hf_export import convert_backbone_to_hf_state_dict, create_hf_config_from_backbone
+        from utils.hf_export import convert_backbone_to_hf_state_dict, create_hf_config_from_backbone, pad_state_dict_uniform
         
         # Ensure save directory exists
         Path(save_path).mkdir(parents=True, exist_ok=True)
@@ -349,6 +349,7 @@ class MaskedBGEM3Backbone(nn.Module):
         # Get state dict and convert keys to HF format
         backbone_state_dict = self.state_dict()
         hf_state_dict = convert_backbone_to_hf_state_dict(backbone_state_dict)
+        hf_state_dict = pad_state_dict_uniform(hf_state_dict)
         
         # Save converted state dict
         model_path = os.path.join(save_path, "pytorch_model.bin")
