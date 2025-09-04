@@ -270,7 +270,7 @@ class ComposerBGEM3(ComposerModel):
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
         
-        from utils.hf_export import save_backbone_as_hf_model
+        from utils.hf_export import export_pruned_backbone_clean
         import json
         
         # Use eval mode for deterministic masks
@@ -288,10 +288,10 @@ class ComposerBGEM3(ComposerModel):
         self.prune_params(zs)
         self._validate_pruned_model()
         
-        # Save backbone as proper HuggingFace model
+        # Save backbone using clean export (no padding)
         print(f"\n💾 Saving pruned model to {save_path}")
         base_model_name = tokenizer_name or getattr(self, 'base_model_name', 'BAAI/bge-m3')
-        save_backbone_as_hf_model(self.backbone, save_path, base_model_name)
+        export_pruned_backbone_clean(self.backbone, save_path, base_model_name)
         
         # Save pruning info
         pruning_info = {
@@ -308,7 +308,7 @@ class ComposerBGEM3(ComposerModel):
         with open(os.path.join(save_path, 'pruning_info.json'), 'w') as f:
             json.dump(pruning_info, f, indent=2)
         
-        print(f"✅ Pruned model saved in HuggingFace format!")
+        print(f"✅ Clean pruned model saved in HuggingFace format!")
         print(f"📁 Location: {save_path}")
         print(f"🔧 Usage: model = AutoModel.from_pretrained('{save_path}')")
         

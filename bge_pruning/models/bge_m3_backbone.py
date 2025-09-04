@@ -329,39 +329,6 @@ class MaskedBGEM3Backbone(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
-    
-    def save_pretrained(self, save_path: str):
-        """Save model in HuggingFace format with proper key mapping"""
-        import os
-        import sys
-        from pathlib import Path
-        
-        # Add utils to path for conversion functions
-        project_root = Path(__file__).parent.parent
-        if str(project_root) not in sys.path:
-            sys.path.insert(0, str(project_root))
-        
-        from utils.hf_export import convert_backbone_to_hf_state_dict, create_hf_config_from_backbone, pad_state_dict_uniform
-        
-        # Ensure save directory exists
-        Path(save_path).mkdir(parents=True, exist_ok=True)
-        
-        # Get state dict and convert keys to HF format
-        backbone_state_dict = self.state_dict()
-        hf_state_dict = convert_backbone_to_hf_state_dict(backbone_state_dict)
-        hf_state_dict = pad_state_dict_uniform(hf_state_dict)
-        
-        # Save converted state dict
-        model_path = os.path.join(save_path, "pytorch_model.bin")
-        torch.save(hf_state_dict, model_path)
-        
-        # Use the proper config builder
-        config_dict = create_hf_config_from_backbone(self)
-        
-        import json
-        config_path = os.path.join(save_path, "config.json")
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2)
 
     def prune_params(self, zs: Dict[str, torch.Tensor]):
         """Prune parameters based on masks"""
