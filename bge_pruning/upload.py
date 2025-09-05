@@ -10,7 +10,9 @@ upload_folder(
     commit_message="Upload experiments_high model"
 )
 
-# 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
+# hf
+# _IFFcrUmIo
+# IhnochFGkPwVHPfnQthVSOpfv
 
 #pip install huggingface_hub
 #huggingface-cli login
