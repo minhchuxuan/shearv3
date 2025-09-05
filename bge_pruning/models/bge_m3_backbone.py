@@ -71,9 +71,19 @@ class MaskedXLMRobertaAttention(nn.Module):
         if head_z is not None:
             # Reshape for broadcasting: [num_heads] → [1, num_heads, 1, 1]
             head_z = head_z.view(1, -1, 1, 1)
-            query_layer = query_layer * head_z
-            key_layer = key_layer * head_z
-            value_layer = value_layer * head_z
+            
+            if self.training:
+                # Soft masking during training to maintain gradient flow
+                # Convert hard masks to soft masks using sigmoid
+                soft_mask = torch.sigmoid(head_z * 4.0)  # Temperature=4 for sharp but differentiable transition
+                query_layer = query_layer * soft_mask
+                key_layer = key_layer * soft_mask
+                value_layer = value_layer * soft_mask
+            else:
+                # Hard masking during inference for clean pruning
+                query_layer = query_layer * head_z
+                key_layer = key_layer * head_z
+                value_layer = value_layer * head_z
 
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
@@ -106,7 +116,13 @@ class MaskedXLMRobertaIntermediate(nn.Module):
         hidden_states = self.dense(hidden_states)
         
         if intermediate_z is not None:
-            hidden_states = hidden_states * intermediate_z
+            if self.training:
+                # Soft masking during training to maintain gradient flow
+                soft_mask = torch.sigmoid(intermediate_z * 4.0)
+                hidden_states = hidden_states * soft_mask
+            else:
+                # Hard masking during inference
+                hidden_states = hidden_states * intermediate_z
             
         hidden_states = self.intermediate_act_fn(hidden_states)
         return hidden_states

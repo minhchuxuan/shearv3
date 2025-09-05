@@ -118,12 +118,23 @@ class ComposerBGEM3(ComposerModel):
             contrastive_loss = self.compute_contrastive_loss(embeddings, batch_size)
             total_loss += contrastive_loss
         
-        # L0 sparsity loss for pruning (scaled to balance with task loss)
+        # L0 sparsity loss for pruning (dynamically scaled to prevent dominance)
         if hasattr(self.l0_module, 'get_sparsity_loss'):
             sparsity_loss, expected_sparsity, expected_score = self.l0_module.get_sparsity_loss()
             constraint_loss = self.compute_constraint_loss(expected_sparsity)
-            # Scale pruning losses to match task loss magnitude (typically 1-5)
-            pruning_weight = 20.0  # Amplify small sparsity losses to be significant
+            
+            # Dynamic scaling based on training progress - start low, increase gradually
+            current_step = getattr(self.l0_module, 'current_step', 0)
+            warmup_steps = getattr(self.l0_module, 'lagrangian_warmup_steps', 1000)
+            
+            if current_step <= warmup_steps:
+                # Very low weight during task learning phase
+                pruning_weight = 0.01
+            else:
+                # Gradually increase after warmup, but cap at reasonable level
+                progress = min(1.0, (current_step - warmup_steps) / 8000)  # Over 8000 steps
+                pruning_weight = 0.01 + 0.49 * progress  # Max 0.5, not 20.0
+            
             total_loss += pruning_weight * (sparsity_loss + constraint_loss)
         
         return total_loss
@@ -291,7 +302,7 @@ class ComposerBGEM3(ComposerModel):
         # Save backbone using clean export (no padding)
         print(f"\n💾 Saving pruned model to {save_path}")
         base_model_name = tokenizer_name or getattr(self, 'base_model_name', 'BAAI/bge-m3')
-        export_pruned_backbone_clean(self.backbone, save_path, base_model_name)
+        export_pruned_backbone_clean(self.backbone, save_path, base_model_name, self.embedding_heads)
         
         # Save pruning info
         pruning_info = {

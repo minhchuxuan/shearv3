@@ -47,11 +47,11 @@ class Mask(nn.Module):
     def initialize_mask(self, mask_shape):
         z_loga = nn.Parameter(torch.zeros(mask_shape, device=self.device))
         
-        # Target-aware initialization to bias toward target architecture
+        # Progressive initialization: start with minimal pruning bias
         if self.target_mask_size is not None and mask_shape[-1] > 0:
-            target_keep_prob = self.target_mask_size / mask_shape[-1]
-            target_keep_prob = max(0.01, min(0.99, target_keep_prob))  # Clamp to valid range
-            alpha_init = math.log(target_keep_prob / (1 - target_keep_prob))
+            # Start with 95% keep probability to allow task learning first
+            initial_keep_prob = 0.95
+            alpha_init = math.log(initial_keep_prob / (1 - initial_keep_prob))
             z_loga.data.fill_(alpha_init)
         else:
             self.param_init_fn(z_loga)
@@ -185,13 +185,23 @@ class L0ModuleEmbedding(nn.Module):
         self.current_step = step
     
     def get_warmup_target_sparsity(self, final_target_sparsity: float) -> float:
-        """LLM-Shearing style sparsity warmup: 0 → target over warmup period"""
-        if self.current_step >= self.sparsity_warmup_steps:
+        """Progressive sparsity warmup: allow task learning before aggressive pruning"""
+        # No pruning during initial task learning phase
+        if self.current_step < self.lagrangian_warmup_steps:
+            return 0.0
+        
+        # Progressive pruning over extended period (3x longer than original)
+        extended_warmup_steps = self.sparsity_warmup_steps * 3
+        if self.current_step >= self.lagrangian_warmup_steps + extended_warmup_steps:
             return final_target_sparsity
         
-        # Linear warmup from 0 to final_target_sparsity
-        progress = self.current_step / self.sparsity_warmup_steps
-        return progress * final_target_sparsity
+        # Use cosine schedule for smoother transition
+        progress = (self.current_step - self.lagrangian_warmup_steps) / extended_warmup_steps
+        progress = min(1.0, progress)
+        
+        # Cosine annealing for smoother sparsity increase
+        cosine_progress = 0.5 * (1 - math.cos(math.pi * progress))
+        return cosine_progress * final_target_sparsity
     
     def extract_model_info(self, model):
         """Extract model configuration from pretrained model"""

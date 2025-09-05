@@ -80,11 +80,13 @@ def transfer_pruned_weights(backbone, hf_model):
                 hf_param.bias.data.zero_()
                 hf_param.bias.data[:all_head_size] = backbone_param.bias.data
             
-            # Attention output projection: map all_head_size back to hidden_size
-            hf_layer.attention.output.dense.weight.data.zero_()
-            # Create identity mapping: [hidden_size, all_head_size] where first all_head_size rows are identity
-            hf_layer.attention.output.dense.weight.data[:all_head_size, :all_head_size] = torch.eye(all_head_size)
-            hf_layer.attention.output.dense.bias.data.zero_()
+            # For pruned heads: create identity mapping for attention output
+            # HF expects [hidden_size, all_head_size] projection
+            hf_out = hf_layer.attention.output.dense
+            hf_out.weight.data.zero_()
+            # Create identity mapping for the remaining heads
+            hf_out.weight.data[:all_head_size, :all_head_size] = torch.eye(all_head_size)
+            hf_out.bias.data.zero_()
             
         else:
             # No head pruning: direct copy
@@ -94,9 +96,10 @@ def transfer_pruned_weights(backbone, hf_model):
                 hf_param.weight.data.copy_(backbone_param.weight.data)
                 hf_param.bias.data.copy_(backbone_param.bias.data)
             
-            # Identity output projection
-            hf_layer.attention.output.dense.weight.data = torch.eye(hidden_size)
-            hf_layer.attention.output.dense.bias.data.zero_()
+            # For no head pruning: create full identity mapping
+            hf_out = hf_layer.attention.output.dense
+            hf_out.weight.data = torch.eye(hidden_size)
+            hf_out.bias.data.zero_()
         
         # 4. MLP layers - direct copy
         hf_layer.intermediate.dense.weight.data.copy_(backbone_layer.intermediate.dense.weight.data)
@@ -104,15 +107,34 @@ def transfer_pruned_weights(backbone, hf_model):
         hf_layer.output.dense.weight.data.copy_(backbone_layer.output.dense.weight.data)
         hf_layer.output.dense.bias.data.copy_(backbone_layer.output.dense.bias.data)
         
-        # 5. Layer norms - copy from backbone structure
-        # Backbone has LayerNorm in output module, HF has it in attention.output and output
+        # 5. Layer norms - backbone has merged LayerNorm, HF expects separate ones
+        # The backbone's output.LayerNorm handles both attention and MLP residuals
+        # We need to copy it to both HF LayerNorm locations
+        
+        # Copy to attention output LayerNorm (handles attention residual in HF)
         hf_layer.attention.output.LayerNorm.weight.data.copy_(backbone_layer.output.LayerNorm.weight.data)
         hf_layer.attention.output.LayerNorm.bias.data.copy_(backbone_layer.output.LayerNorm.bias.data)
+        
+        # Copy to MLP output LayerNorm (handles MLP residual in HF) 
         hf_layer.output.LayerNorm.weight.data.copy_(backbone_layer.output.LayerNorm.weight.data)
         hf_layer.output.LayerNorm.bias.data.copy_(backbone_layer.output.LayerNorm.bias.data)
 
 
-def export_pruned_backbone_clean(backbone, save_path, base_model_name="BAAI/bge-m3"):
+def export_embedding_heads(embedding_heads, save_path):
+    """Export the embedding heads separately for complete model functionality"""
+    heads_path = os.path.join(save_path, "embedding_heads.pt")
+    heads_state = {
+        'dense_head': embedding_heads.dense_head.state_dict(),
+        'sparse_head': embedding_heads.sparse_head.state_dict(), 
+        'multi_vector_head': embedding_heads.multi_vector_head.state_dict(),
+        'vocab_size': embedding_heads.vocab_size,
+        'hidden_size': embedding_heads.hidden_size,
+    }
+    torch.save(heads_state, heads_path)
+    print(f"✅ Embedding heads saved to {heads_path}")
+
+
+def export_pruned_backbone_clean(backbone, save_path, base_model_name="BAAI/bge-m3", embedding_heads=None):
     """Export truly pruned model without padding"""
     Path(save_path).mkdir(parents=True, exist_ok=True)
     
@@ -132,6 +154,24 @@ def export_pruned_backbone_clean(backbone, save_path, base_model_name="BAAI/bge-
     # 5. Save tokenizer
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     tokenizer.save_pretrained(save_path)
+    
+    # 6. Save embedding heads if provided
+    if embedding_heads is not None:
+        export_embedding_heads(embedding_heads, save_path)
+        
+        # Save complete model configuration
+        model_config = {
+            'architecture': 'bge-m3-pruned',
+            'has_embedding_heads': True,
+            'base_model': base_model_name,
+            'head_config': {
+                'dense_dim': embedding_heads.dense_head.output_dim,
+                'vocab_size': embedding_heads.vocab_size,
+                'hidden_size': embedding_heads.hidden_size,
+            }
+        }
+        with open(os.path.join(save_path, 'model_config.json'), 'w') as f:
+            json.dump(model_config, f, indent=2)
     
     print(f"✅ Clean pruned model exported to {save_path}")
     print(f"📊 Architecture: {pruned_config['num_hidden_layers']} layers, {pruned_config['num_attention_heads']} heads, {pruned_config['intermediate_size']} intermediate")

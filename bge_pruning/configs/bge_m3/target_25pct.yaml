@@ -11,7 +11,7 @@ model:
     # Production pruning: head, layer, intermediate only
     pruning_modules: ["layer", "head", "intermediate"]
     start_sparsity: 0.0
-    lagrangian_warmup_steps: "1000ba"
+    lagrangian_warmup_steps: "3000ba"  # Extended warmup for task learning
     eval_target_model: true
     
     # Target architecture for 25% reduction (light pruning)
@@ -21,16 +21,16 @@ model:
       intermediate_size: 3072  # From 4096 (25% reduction)
 
 optimizer:
-  # Stable learning rates for production
-  lr: 7.0e-6
+  # Stable learning rates for production (reduced for stability)
+  lr: 1.0e-5
   betas: [0.9, 0.999]
   eps: 1.0e-8
   weight_decay: 0.01
 
-# Training settings
+# Training settings (extended for progressive pruning)
 batch_size: 16
 max_length: 512
-max_duration: "10000ba"
+max_duration: "15000ba"  # Extended training for progressive schedule
 eval_interval: "500ba"
 save_interval: "1000ba"
 save_folder: "experiments/production_25pct"
